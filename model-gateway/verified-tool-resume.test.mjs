@@ -41,6 +41,17 @@ test('普通检查点不会自动接受工具尾部，人工检查点没有新�
  }finally{await f.close();}
 });
 
+test('已核验结果之后的真实用户增量原样恢复，收据之前插入仍拒绝',async()=>{
+ const f=await fixture();try{
+  const user={role:'user',content:'<system-reminder>Caller background task stopped</system-reminder>\n\n继续'};
+  const request={messages:[f.prefix,f.assistant,f.receipt,user]};
+  const result=await f.store.take(request,f.signature,true,undefined,{consume:false});
+  assert.equal(result.id,f.id);assert.deepEqual(result.delta,[user]);
+  const invalid={messages:[f.prefix,f.assistant,user,f.receipt]};
+  assert.equal((await f.store.take(invalid,f.signature,true,undefined,{consume:false}))?.id,undefined);
+ }finally{await f.close();}
+});
+
 test('持久检查点按已保存的较小输出上限恢复，其他配置签名仍严格校验',async()=>{
  const f=await fixture();try{
   f.row.compactSource={outputTokens:64000};await f.store.persist();
