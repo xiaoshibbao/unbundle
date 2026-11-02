@@ -27,7 +27,7 @@ test('只接回已采样的同 ID 真实回执，其余参数/历史变化及缺
  const returned=structuredClone(original);returned.tool_calls[0].function.arguments='{"command":"do-work","description":"same"}';
  const request={messages:[user,returned,{role:'tool',tool_call_id:'not-returned',content:'ACTUAL'}],tools};
  const phases={cli:{command:'cd /e/project && do-work'},wire:{command:'cd /e/project && do-work'},desktop:{command:'do-work'}},snapshot=()=>[{phases}],options={hashKey:key,allowInstructionUpdates:true};
- const accepted=bashReceiptHandoff(s,request,options,snapshot);assert(accepted);assert.match(accepted.context.content,/NOT declared equivalent/);assert.deepEqual(accepted.delta,[request.messages[2]]);
+ const accepted=bashReceiptHandoff(s,request,options,snapshot);assert(accepted);assert.match(accepted.context.content,/NOT declared equivalent/);assert.match(accepted.context.content,/not a user cancellation/);assert.match(accepted.context.content,/Continue the current authorized user task/);assert.deepEqual(accepted.delta,[request.messages[2]]);
  for(const mutate of [r=>r.messages[0].content='changed',r=>r.messages[1].tool_calls[0].function.arguments='{"command":"do-work","description":"changed"}',r=>r.messages[1].tool_calls[0].id='other',r=>r.messages.pop(),r=>r.messages.push(r.messages[2])]){const altered=structuredClone(request);mutate(altered);assert.equal(bashReceiptHandoff(s,altered,options,snapshot),undefined);}
  assert.equal(bashReceiptHandoff(s,request,options,()=>[]),undefined);assert.equal(bashReceiptHandoff(s,request,options,()=>[{phases:{...phases,wire:{command:'different'}}}]),undefined);
 });
