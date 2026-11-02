@@ -73,6 +73,8 @@ const nativeRelay = process.env.GATEWAY_SESSION_RELAY === '1' ? sessionRelay({
   persistentSessions, cliVersion: startupCliVersion, anomalyDir,
   requireLiveToolContinuation: true,
   preserveCancelledSession: true,
+  // 显式授权的连续性模式保留原 CLI 实际预算，不声称执行较低的客户端上限。
+  keepNativeOutputBudget: process.env.GATEWAY_KEEP_NATIVE_OUTPUT_BUDGET === '1',
   allowToolHandoffUserMessages: true,
   onCliAudit: record => console.error(JSON.stringify(record)),
   onSessionEvent: record => console.error(JSON.stringify(record)),

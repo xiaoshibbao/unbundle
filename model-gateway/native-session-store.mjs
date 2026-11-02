@@ -183,7 +183,7 @@ export class NativeSessionStore {
     }catch { /* 已封存索引；磁盘错误不允许恢复推理。 */ }
     return result;
   }
-  async take(request, signature, allowInstructionUpdates, affinityHash, {consume=true,signatureFor,requestedOutputTokens}={}) {
+  async take(request, signature, allowInstructionUpdates, affinityHash, {consume=true,signatureFor,requestedOutputTokens,keepNativeOutputBudget=false}={}) {
     await this.ready;
     for (const row of this.records.values()) {
       if (row.affinityHash !== affinityHash) continue;
@@ -202,7 +202,7 @@ export class NativeSessionStore {
           pendingIds: new Set(row.verifiedToolResults?.map(v=>v.id)||[]) }, request,
         { allowInstructionUpdates, hashKey: this.key });
       if (!delta) { if (affinityHash) return this.rejectRestore(row,request,{mismatch:true},'CHECKPOINT_HISTORY_MISMATCH'); continue; }
-      if (signatureFor) assertOutputBudget(actual, requestedOutputTokens);
+      if (signatureFor) assertOutputBudget(actual,keepNativeOutputBudget?Math.max(actual,requestedOutputTokens):requestedOutputTokens);
       if(row.verifiedToolResults){
         // 仅管理员在原生副本离线核验、真实结果已写入后建立此检查点；普通请求不创建它。
         // 已持久化的结果只核对 HMAC，不再交给 CLI，也不自动重跑对应工具。

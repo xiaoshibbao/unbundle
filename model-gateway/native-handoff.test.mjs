@@ -18,6 +18,8 @@ const call=async(id,name,path)=>{if(mcpDelay)await new Promise(resolve=>setTimeo
 let inputs=0;
 readline.createInterface({input:process.stdin}).on('line',line=>{
  if(mode==='bash-alias'&&(JSON.parse(line).type!=='user'||++inputs!==1))throw Error('UNEXPECTED INTERRUPT OR EXTRA USER FRAME');
+ const frame=JSON.parse(line);
+ if(frame.type==='control_request'&&frame.request.subtype==='mcp_set_servers'){emit({type:'control_response',response:{request_id:frame.request_id,subtype:'success',response:{added:Object.keys(frame.request.servers)}}});return;}
  if(mode==='aggregate')emit({type:'system',subtype:'api_retry',attempt:1});else start('initial');
  const tools=[{type:'tool_use',id:'native_1',name:'mcp__omp__Read',input:mode==='reordered'?{options:{limit:5,offset:0},path:'first'}:{path:'first'}}];
  if(mode==='bash-alias')tools[0]={type:'tool_use',id:'native_1',name:'mcp__omp__Bash',input:{command:'cd /e/project && synthetic-only',description:'same'}};
@@ -46,14 +48,34 @@ const request = { model: 'claude-opus-5-5', max_tokens: 1024, messages: [{ role:
   tools: ['Read', 'Write'].map(name => ({ type: 'function', function: { name, parameters: { type: 'object' } } })) };
 // Windows CI 的子进程首次 fetch 可能超过 150ms；正常路径留足预算，超时测试单独收窄。
 async function setup(mode, overrides={}) {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'native-handoff-')), records = []; let spawns = 0;
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'native-handoff-')), records = [], sessions=new Set(); let spawns = 0;
   const relay = sessionRelay({ home, model: request.model, maxOutputTokens: 1024, timeoutMs: 10000, handoffTimeoutMs: 2000,
     requireLiveToolContinuation: true, maxSessions: 1, ...overrides,
     onSessionEvent: value => records.push(value),
     spawnProcess: (_cli, args, options) => { spawns++; return spawn(process.execPath,
-      ['--input-type=module', '-e', script, args[args.indexOf('--mcp-config') + 1], mode,String(overrides.mockMcpDelayMs||0)], options); } });
-  return { relay, records, spawns: () => spawns, async close() { await relay.close({discardFrozen:true}); await fs.rm(home, { recursive: true, force: true }); } };
+      ['--input-type=module', '-e', script, args[args.indexOf('--mcp-config') + 1], mode,String(overrides.mockMcpDelayMs||0)], options); } },{sessions});
+  return { relay, records, sessions, spawns: () => spawns, async close() { await relay.close({discardFrozen:true}); await fs.rm(home, { recursive: true, force: true }); } };
 }
+
+for(const frozen of [false,true])test('断线丢失工具回复只重传同ID回复，原MCP接收结果且不重复推理 frozen='+frozen,{skip:frozen&&process.platform!=='linux'},async()=>{
+ const state=await setup('serial',{liveInstructionUpdates:true});
+ try{
+  const first=await state.relay.infer(request),session=[...state.sessions][0],pid=session.child.pid;
+  if(frozen)await session.freeze('ASSISTANT_MESSAGE_MISMATCH',{request:{...request,messages:[...request.messages,{role:'user',content:'继续'}]}});
+  const notification={role:'system',content:'# Environment update\n - Primary working directory: E:\\ (was E:\\project)\n\nA file changed externally. Preserve the current file.'};
+  const retry={...request,messages:[...request.messages,{role:'user',content:'继续'},notification]};
+  const replay=await state.relay.infer(retry);
+  assert.deepEqual(replay.tool_calls,first.tool_calls);assert.equal(replay.upstream_usage.input_tokens,0);assert.equal(session.child.pid,pid);assert.equal(session.state,'waiting-tool');
+  assert.equal(session.liveInstructions.at(-1).content,notification.content);
+  const revision=session.instructionRevision;assert.deepEqual((await state.relay.infer(retry)).tool_calls,first.tool_calls);assert.equal(session.instructionRevision,revision);
+  assert.deepEqual((await state.relay.infer(request)).tool_calls,first.tool_calls);
+  const next={...retry,messages:[...retry.messages,assistantMessage(replay),...replay.tool_calls.map(c=>({role:'tool',tool_call_id:c.id,content:'REAL_RESULT'}))]};
+  // 上一次精确旧请求重传后，按最后实际交付的 Desktop 历史回传。
+  const delivered={...next,messages:[...request.messages,assistantMessage(replay),...next.messages.filter(m=>m.role==='tool')]};
+  assert.equal((await state.relay.infer(delivered)).content,'DONE');assert.equal(state.spawns(),1);
+  assert(state.records.some(r=>r.type==='native_tool_response_replayed'&&r.model_requests===0));
+ }finally{await state.close();}
+});
 
 test('Bash 往返别名直接交回原 MCP：无 interrupt、无额外用户帧、同进程且结果只交付一次',async()=>{
  const state=await setup('bash-alias');
@@ -217,6 +239,15 @@ test('工具续接提高输出上限后仍复用原进程，并能切回原上�
 test('低于原 CLI 实际输出上限的续接仍然拒绝',async()=>{
  const state=await setup('reordered',{maxOutputTokens:2048});
  try{const first=await state.relay.infer(request);const next={...request,max_tokens:512,messages:[...request.messages,assistantMessage(first),...first.tool_calls.map(c=>({role:'tool',tool_call_id:c.id,content:'REAL_RESULT'}))]};await assert.rejects(state.relay.infer(next),{code:'SESSION_OUTPUT_BUDGET_TOO_SMALL'});assert.equal(state.spawns(),1);}finally{await state.close();}
+});
+
+test('显式保留原生预算时较低客户端上限可续接，原 CLI 预算和进程均不变',async()=>{
+ const state=await setup('reordered',{keepNativeOutputBudget:true});
+ try{const first=await state.relay.infer(request),session=[...state.sessions][0],pid=session.child.pid;
+  const next={...request,max_tokens:512,messages:[...request.messages,assistantMessage(first),...first.tool_calls.map(c=>({role:'tool',tool_call_id:c.id,content:'REAL_RESULT'}))]};
+  assert.equal((await state.relay.infer(next)).content,'DONE');assert.equal(session.child.pid,pid);assert.equal(session.options.outputTokens,1024);assert.equal(state.spawns(),1);
+  assert(state.records.some(r=>r.type==='native_output_budget_compatibility'&&r.requestedOutputTokens===512&&r.cliOutputTokens===1024));
+ }finally{await state.close();}
 });
 
 

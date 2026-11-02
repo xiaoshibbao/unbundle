@@ -1,4 +1,6 @@
 import {reclaimSessionCapacity} from './session-capacity.mjs';
+import {pendingResponseReplay} from './pending-response-replay.mjs';
+import {resumeCli} from './process-freeze.mjs';
 import {sessionOutputTokens,assertOutputBudget,withoutOutputBudget} from './session-budget.mjs';
 import {automaticRecoveryRequest,automaticRecoveryIdentity} from './automatic-recovery.mjs';
 import {quotaRecoveryDelta} from './quota-recovery.mjs';
@@ -79,7 +81,14 @@ export function sessionRelay(options, retained) {
       // 保持旧签名算法，用候选 CLI 的实际预算验证身份，再单独检查本轮上限。
       const signature = signatureFor(outputTokens);
       const matchesSignature = session => session.signature === signatureFor(sessionOutputTokens(session) ?? outputTokens);
-      const checkBudget = session => assertOutputBudget(sessionOutputTokens(session) ?? (session.signature === signature ? outputTokens : undefined), outputTokens);
+      const checkBudget = session => {
+        const actual=sessionOutputTokens(session)??(session.signature===signature?outputTokens:undefined);
+        if(options.keepNativeOutputBudget===true&&Number.isSafeInteger(actual)&&actual>outputTokens){
+          try{options.onSessionEvent?.({type:'native_output_budget_compatibility',sessionId:session.sessionId,requestedOutputTokens:outputTokens,cliOutputTokens:actual,mode:'keep_native',model_requests:0});}catch{}
+          return;
+        }
+        assertOutputBudget(actual,outputTokens);
+      };
       const affinityHash = affinity ? createHmac('sha256', matchKey).update('sticky:'+affinity.key).digest('hex') : undefined;
       if(compactionIntent(request)) {
         const replayKey=createHmac('sha256',matchKey).update(retryIdentity(request)).digest('hex');
@@ -135,6 +144,32 @@ export function sessionRelay(options, retained) {
         } catch(error){
           throw error;
         } finally {session.compacting=false;session.creationReserved=false;}
+      }
+      const deliveries=[...sessions].filter(s=>s.affinityHash===affinityHash&&matchesSignature(s)).flatMap(session=>{
+        const replay=pendingResponseReplay(session,request,{hashKey:store?.key,allowInstructionUpdates:options.liveInstructionUpdates===true});
+        return replay?[{session,replay}]:[];
+      });
+      if(deliveries.length>1)throw recoveryError('RECOVERY_SESSION_AMBIGUOUS','未交付回复不能唯一关联原会话');
+      if(deliveries.length){
+        const {session,replay}=deliveries[0];checkBudget(session);signal?.throwIfAborted();
+        if(!session.processAlive()||replay.frozen&&!await session.verifySuspended())throw recoveryError('NATIVE_PROCESS_GONE','原工具等待进程不可确认');
+        const update=()=>session.updateInstructions(request,replay.updates.filter(m=>!(session.liveInstructions||[]).some(u=>
+          u.messageIndex===request.messages.indexOf(m)&&u.role===m.role&&stableJson(u.content)===stableJson(m.content))));
+        if(replay.frozen){
+          const record=session.quarantineRecord;
+          await resumeCli(session.child);
+          session.state='waiting-tool';session.freezing=undefined;session.frozenProcess=undefined;
+          try{
+            await update();
+            if(record)await store?.releaseQuarantine(record);
+            for(let i=quarantined.length-1;i>=0;i--)if(quarantined[i]===record)quarantined.splice(i,1);
+          }catch(error){await session.freeze('ASSISTANT_MESSAGE_MISMATCH',{request});throw error;}
+          session.quarantineRecord=undefined;session.freezeReason=undefined;session.frozenRequest=undefined;session.recoveryArmed=false;
+        }else await update();
+        session.pendingReplyBase={expected:session.expected,history:replay.base};
+        session.request=request;session.history=replay.history;session.lastUsed=Date.now();
+        try{options.onSessionEvent?.({type:'native_tool_response_replayed',sessionId:session.sessionId,requestId:timing?.requestId,model_requests:0,toolCalls:replay.assistant.tool_calls.length,nativeProcessPreserved:true});}catch{}
+        return {...replay.assistant,usage_complete:true,upstream_usage:{input_tokens:0,output_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0},usage:{prompt_tokens:0,completion_tokens:0,total_tokens:0}};
       }
       const replay=[...sessions].find(s=>['idle','waiting-tool'].includes(s.state)&&matchesSignature(s)&&s.affinityHash===affinityHash
         &&s.automaticRecoveryResult?.identity===automaticRecoveryIdentity(request)&&s.automaticRecoveryResult.history===s.history&&s.automaticRecoveryResult.expected===s.expected);
@@ -351,7 +386,7 @@ export function sessionRelay(options, retained) {
             { code: 'TOOL_CONTINUATION_UNCERTAIN', status: 409, retryable: false });
         }
         selected = await allocate(async () => {
-        const restored = await store?.take(request, signature, options.liveInstructionUpdates === true, affinityHash, {consume:false, signatureFor, requestedOutputTokens:outputTokens});
+        const restored = await store?.take(request, signature, options.liveInstructionUpdates === true, affinityHash, {consume:false, signatureFor, requestedOutputTokens:outputTokens,keepNativeOutputBudget:options.keepNativeOutputBudget===true});
         if(restored?.id&&[...sessions].some(s=>s.nativeSessionId===restored.id&&s.state!=='closed'))throw recoveryError('NATIVE_SESSION_ALREADY_LIVE','原生会话仍有存活进程；禁止从检查点重复启动');
         if (restored?.mismatch) throw Object.assign(new Error('固定会话的持久检查点不匹配'), {code:'SESSION_HISTORY_MISMATCH',status:409,retryable:false});
         if (restored?.missing) throw Object.assign(new Error('已绑定的原生历史文件缺失；禁止自动重建长历史'), {code:'NATIVE_TRANSCRIPT_MISSING',status:409,retryable:false});

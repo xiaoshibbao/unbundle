@@ -59,6 +59,8 @@ test('持久检查点按已保存的较小输出上限恢复，其他配置签�
   const result=await f.store.take(request,signature,true,undefined,{consume:false,requestedOutputTokens:128000,signatureFor:cap=>cap===64000?f.signature:signature});
   assert.equal(result.id,f.id);assert.equal(result.outputTokens,64000);assert.equal(f.store.records.get(f.id).signature,f.signature);
   await assert.rejects(f.store.take(request,signature,true,undefined,{consume:false,requestedOutputTokens:32000,signatureFor:()=>f.signature}),{code:'SESSION_OUTPUT_BUDGET_TOO_SMALL'});
+  const compatible=await f.store.take(request,signature,true,undefined,{consume:false,requestedOutputTokens:32000,signatureFor:()=>f.signature,keepNativeOutputBudget:true});
+  assert.equal(compatible.id,f.id);assert.equal(compatible.outputTokens,64000);assert.equal(f.store.records.get(f.id).signature,f.signature);
   assert.equal(await f.store.take(request,signature,true,undefined,{consume:false,requestedOutputTokens:128000,signatureFor:()=>signature}),undefined);
   assert(f.store.records.has(f.id));
  }finally{await f.close();}
