@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { sessionRelay } from './session-relay.mjs';
 import { assistantMessage } from './session-history.mjs';
+import {recordBashPhase} from './tool-boundary-trace.mjs';
 
 // 仅运行 Node 模拟协议进程，绝不运行官方 Claude CLI 或使用账号。
 const script = `import fs from 'node:fs';import readline from 'node:readline';
@@ -13,10 +14,13 @@ const config=JSON.parse(fs.readFileSync(process.argv[1],'utf8')).mcpServers.omp,
 const emit=v=>console.log(JSON.stringify(v));
 const start=id=>emit({type:'stream_event',event:{type:'message_start',message:{id,usage:{input_tokens:1,output_tokens:0}}}});
 const call=async(id,name,path)=>{if(mcpDelay)await new Promise(resolve=>setTimeout(resolve,mcpDelay));return fetch(config.url,{method:'POST',headers:{...config.headers,'content-type':'application/json'},
- body:JSON.stringify({jsonrpc:'2.0',id,method:'tools/call',params:{name,arguments:mode==='reordered'?{path,options:{offset:0,limit:5}}:mode==='unicode'||mode==='unicode-mismatch'?{path,content:mode==='unicode'?String.fromCharCode(0x2019):'changed'}:{path},_meta:{'claudecode/toolUseId':id}}})});};
-readline.createInterface({input:process.stdin}).on('line',()=>{
+ body:JSON.stringify({jsonrpc:'2.0',id,method:'tools/call',params:{name,arguments:mode==='bash-alias'?{command:'cd /e/project && synthetic-only',description:'same'}:mode==='reordered'?{path,options:{offset:0,limit:5}}:mode==='unicode'||mode==='unicode-mismatch'?{path,content:mode==='unicode'?String.fromCharCode(0x2019):'changed'}:{path},_meta:{'claudecode/toolUseId':id}}})});};
+let inputs=0;
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ if(mode==='bash-alias'&&(JSON.parse(line).type!=='user'||++inputs!==1))throw Error('UNEXPECTED INTERRUPT OR EXTRA USER FRAME');
  if(mode==='aggregate')emit({type:'system',subtype:'api_retry',attempt:1});else start('initial');
  const tools=[{type:'tool_use',id:'native_1',name:'mcp__omp__Read',input:mode==='reordered'?{options:{limit:5,offset:0},path:'first'}:{path:'first'}}];
+ if(mode==='bash-alias')tools[0]={type:'tool_use',id:'native_1',name:'mcp__omp__Bash',input:{command:'cd /e/project && synthetic-only',description:'same'}};
  if(mode==='unicode'||mode==='unicode-mismatch'){tools[0]={type:'tool_use',id:'native_1',name:'mcp__omp__Write',input:{path:'first',content:String.fromCharCode(0x2019)}};emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'native_1',name:'mcp__omp__Write',input:{}}}});emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify({path:'first',content:String.fromCharCode(92)+'u2019'})}}});}
  if(mode==='serial')tools.push({type:'tool_use',id:'native_2',name:'mcp__omp__Write',input:{path:'second'}});
  emit({type:'assistant',message:{id:'initial',content:tools,...(mode==='aggregate'?{stop_reason:'tool_use',usage:{input_tokens:2,output_tokens:3}}:{})}});
@@ -27,9 +31,10 @@ readline.createInterface({input:process.stdin}).on('line',()=>{
   setTimeout(()=>emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'native_1',is_error:true,content:'Synthetic internal rejection'}]}}),20);return;
  }
  if(mode==='unrequested')setTimeout(()=>start('unexpected'),80);
- call('native_1',mode==='unicode'||mode==='unicode-mismatch'?'Write':'Read','first').then(async response=>{
+ call('native_1',mode==='bash-alias'?'Bash':mode==='unicode'||mode==='unicode-mismatch'?'Write':'Read','first').then(async response=>{
   if(!response.ok)return;
-  await response.json();
+  const receipt=await response.json();
+  if(mode==='bash-alias'&&JSON.stringify(receipt.result)!==JSON.stringify({content:[{type:'text',text:'ACTUAL_RESULT'}]}))throw Error('RESULT WAS MODIFIED');
   if(mode==='serial'){const second=await call('native_2','Write','second');if(!second.ok)return;await second.json();}
   start('continued');
   emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'DONE'}}});
@@ -49,6 +54,23 @@ async function setup(mode, overrides={}) {
       ['--input-type=module', '-e', script, args[args.indexOf('--mcp-config') + 1], mode,String(overrides.mockMcpDelayMs||0)], options); } });
   return { relay, records, spawns: () => spawns, async close() { await relay.close({discardFrozen:true}); await fs.rm(home, { recursive: true, force: true }); } };
 }
+
+test('Bash 往返别名直接交回原 MCP：无 interrupt、无额外用户帧、同进程且结果只交付一次',async()=>{
+ const state=await setup('bash-alias');
+ const req={...request,tools:[{type:'function',function:{name:'Bash',parameters:{type:'object'}}}]};
+ try{
+  const first=await state.relay.infer(req),returned=structuredClone(assistantMessage(first));
+  assert.equal(JSON.parse(first.tool_calls[0].function.arguments).command,'cd /e/project && synthetic-only');
+  recordBashPhase('wire','native_1','Bash',JSON.parse(first.tool_calls[0].function.arguments));
+  returned.tool_calls[0].function.arguments=JSON.stringify({command:'synthetic-only',description:'same'});
+  recordBashPhase('desktop','native_1','Bash',{command:'synthetic-only'});
+  const next={...req,messages:[...req.messages,returned,{role:'tool',tool_call_id:'native_1',content:'ACTUAL_RESULT'}]};
+  assert.equal((await state.relay.infer(next)).content,'DONE');
+  assert.equal(state.spawns(),1);
+  assert(!state.records.some(r=>r.code==='ASSISTANT_MESSAGE_MISMATCH'||r.type==='native_unrequested_recovery'));
+  assert.equal(JSON.parse(first.tool_calls[0].function.arguments).command,'cd /e/project && synthetic-only');
+ }finally{await state.close();}
+});
 
 test('没有真实 MCP 等待时不向 Desktop 交付虚假可续接工具', async () => {
   for (const [mode, code] of [['timeout', 'CLI_TOOL_HANDOFF_TIMEOUT'], ['internal-error', 'CLI_TOOL_HANDOFF_FAILED']]) {

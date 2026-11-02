@@ -4,7 +4,7 @@ import path from 'node:path';
 import {continuationDelta,sessionHistory,historyKey}from './session-history.mjs';
 import {assistantDifference}from './assistant-diff.mjs';
 import {stableJson}from './context.mjs';
-import {mappedBashAssistant}from './bash-roundtrip.mjs';
+import {mappedBashAssistant,mappedPendingBashAssistant}from './bash-roundtrip.mjs';
 export const recoveryError=(code,message)=>Object.assign(new Error(message),{code,status:409,retryable:false});
 export function recoveryDelta(session,request,options={}) {
  if(session.frozenTurn||!['idle','waiting-tool'].includes(session.freezePreviousState))throw recoveryError('RECOVERY_BOUNDARY_UNSAFE','冻结发生在推理中途，不能按工具交接恢复');
@@ -13,7 +13,8 @@ export function recoveryDelta(session,request,options={}) {
  let proxy=session;
  const matchOptions={hashKey:options.hashKey,toolSchemas:session.historyNormalization?request.tools:undefined};
  const strictMatch=historyKey(actual,matchOptions)===session.expected;
- const mappedMatch=!strictMatch&&session.request&&historyKey(mappedBashAssistant(actual,session.request.messages),matchOptions)===session.expected;
+ const mappedMatch=!strictMatch&&(session.request&&historyKey(mappedBashAssistant(actual,session.request.messages),matchOptions)===session.expected
+  ||historyKey(mappedPendingBashAssistant(actual,session),matchOptions)===session.expected);
  if(!strictMatch&&!mappedMatch){
   const difference=assistantDifference(session.expectedFingerprint,actual,{hashKey:options.hashKey});
   if(difference.classification!=='representation_candidate')throw recoveryError('RECOVERY_ARGUMENTS_CHANGED','工具参数或正文发生真实变化，不能解冻');

@@ -1,12 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {recordBashPhase} from './tool-boundary-trace.mjs';
-import {mappedBashAssistant} from './bash-roundtrip.mjs';
+import {mappedBashAssistant,mappedPendingBashAssistant} from './bash-roundtrip.mjs';
 import {continuationDelta,historyKey} from './session-history.mjs';
 import {recoveryDelta} from './session-recovery.mjs';
 import {callerRuntimeStatus} from './runtime-status.mjs';
 import {compileContext} from './context.mjs';
 const env=cwd=>({role:'system',content:`# Environment update\n - Primary working directory: ${cwd} (was E:\\)\n`});
+
+test('原生等待边界使用独立历史别名，不猜测目录，不放宽其他字段或回执',()=>{
+ const {expected,actual}=fixture('pending-alias');
+ const native=expected.tool_calls[0],receipt={role:'tool',tool_call_id:native.id,content:'REAL'};
+ const session={state:'waiting-tool',request:{messages:[]},history:[],expected:historyKey(expected),
+  lastCalls:new Map([[native.id,native]]),pendingIds:new Set([native.id]),
+  pendingHttp:new Map([[native.id,{name:'Bash',args:native.function.arguments}]]),results:new Map(),pendingControls:new Map()};
+ const request={messages:[actual,receipt]};
+ assert.deepEqual(continuationDelta(session,request),[receipt]);
+ assert.deepEqual(recoveryDelta({...session,state:'frozen',freezePreviousState:'waiting-tool',freezeReason:'ASSISTANT_MESSAGE_MISMATCH'},request),[receipt]);
+ assert.equal(JSON.parse(actual.tool_calls[0].function.arguments).command,'python promo/build.py');
+ for(const mutate of [r=>r.messages[0].content='changed',r=>r.messages[0].tool_calls[0].id='other',
+  r=>r.messages[0].tool_calls[0].function.arguments='{"command":"python other.py","description":"build"}',
+  r=>r.messages[0].tool_calls[0].function.arguments='{"command":"python promo/build.py","description":"changed"}',
+  r=>r.messages[1].tool_call_id='other',r=>r.messages.push(receipt)]){
+  const changed=structuredClone(request);mutate(changed);assert.equal(continuationDelta(session,changed),undefined);
+ }
+ assert.strictEqual(mappedPendingBashAssistant(actual,{...session,lastCalls:new Map()}),actual);
+ assert.strictEqual(mappedPendingBashAssistant(actual,{...session,pendingHttp:new Map([[native.id,{name:'Bash',args:'{}'}]])}),actual);
+ assert.strictEqual(mappedPendingBashAssistant(actual,session,()=>[]),actual);
+});
 function fixture(id,original='cd /e/sr/Poem && python promo/build.py',returned='python promo/build.py',wire=original){
  for(const [phase,command] of [['cli',original],['wire',wire],['desktop',returned]])recordBashPhase(phase,id,'Bash',{command});
  const make=command=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name:'Bash',arguments:JSON.stringify({command,description:'build'})}}]});

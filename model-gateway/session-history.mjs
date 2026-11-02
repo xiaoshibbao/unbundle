@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { stableJson, normalizeImage } from './context.mjs';
 import { callerRuntimeStatus } from './runtime-status.mjs';
 import { assistantDifference } from './assistant-diff.mjs';
-import { mappedBashAssistant } from './bash-roundtrip.mjs';
+import { mappedBashAssistant, mappedPendingBashAssistant } from './bash-roundtrip.mjs';
 
 // 仅用于匹配同一调用方的历史前缀；不保存正文、工具参数或可离线猜测的裸哈希。
 const key = randomBytes(32);
@@ -152,7 +152,8 @@ export function continuationDelta(session, request, { allowInstructionUpdates = 
   const actual=messages[prefix.length];
   const strictMatch=historyKey(actual,{hashKey,toolSchemas})===session.expected;
   // 使用原调用发出前保存的请求，不采用本轮新出现或工具执行后的 cwd。
-  const mappedMatch=!strictMatch&&session.request&&historyKey(mappedBashAssistant(actual,session.request.messages),{hashKey,toolSchemas})===session.expected;
+  const mappedMatch=!strictMatch&&(session.request&&historyKey(mappedBashAssistant(actual,session.request.messages),{hashKey,toolSchemas})===session.expected
+    ||historyKey(mappedPendingBashAssistant(actual,session),{hashKey,toolSchemas})===session.expected);
   if (!strictMatch&&!mappedMatch) {
     try { onAssistantMismatch?.(assistantDifference(session.expectedFingerprint,messages[prefix.length],{hashKey})); } catch {}
     return reject('assistant_message_mismatch');

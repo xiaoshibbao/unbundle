@@ -1,5 +1,32 @@
 import {toolBoundarySnapshot} from './tool-boundary-trace.mjs';
 import {callerRuntimeStatus} from './runtime-status.mjs';
+import {stableJson} from './context.mjs';
+
+// 历史往返别名，不改写执行命令、不声明 cwd 等价。仅用于仍在等待的原生调用；
+// 完整助手哈希和回执集合仍由 continuationDelta 校验，结果仍回到原 MCP。
+export function mappedPendingBashAssistant(message, session, snapshot=toolBoundarySnapshot) {
+ if(!['waiting-tool','frozen'].includes(session.state)||session.turn||!session.pendingIds?.size
+   ||session.results?.size||session.pendingControls?.size||!message?.tool_calls?.length)return message;
+ if(session.state==='frozen'&&(session.freezePreviousState!=='waiting-tool'
+   ||!['ASSISTANT_MESSAGE_MISMATCH','BASH_RECEIPT_REPRESENTATION'].includes(session.freezeReason)))return message;
+ let changed=false;
+ const calls=message.tool_calls.map(call=>{
+  if(call.function?.name!=='Bash'||!session.pendingIds.has(call.id))return call;
+  const native=session.lastCalls?.get(call.id),pending=session.pendingHttp?.get(call.id);
+  if(native?.function?.name!=='Bash')return call;
+  let input,originalInput;try{input=JSON.parse(call.function.arguments);originalInput=JSON.parse(native.function.arguments);}catch{return call;}
+  if(pending&&(pending.name!=='Bash'||pending.args!==native.function.arguments))return call;
+  const phases=snapshot([call.id])[0]?.phases,original=originalInput.command;
+  if(typeof original!=='string'||phases?.cli?.command!==original||phases?.wire?.command!==original
+    ||phases?.desktop?.command!==input.command)return call;
+  const match=/^cd (\/[A-Za-z]\/[A-Za-z0-9_./-]+) && ([\s\S]+)$/.exec(original);
+  if(!match||match[1].split('/').some(p=>p==='.'||p==='..')||match[2]!==input.command
+    ||stableJson({...input,command:original})!==stableJson(originalInput))return call;
+  changed=true;
+  return {...call,function:{...call.function,arguments:native.function.arguments}};
+ });
+ return changed?{...message,tool_calls:calls}:message;
+}
 
 // 仅使用调用前已收到的目录更新与同 ID 的三点采样，不推测执行目录。
 export function mappedBashAssistant(message, precedingMessages, snapshot=toolBoundarySnapshot) {

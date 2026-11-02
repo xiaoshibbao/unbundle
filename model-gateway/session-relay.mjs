@@ -1,4 +1,3 @@
-import {bashReceiptHandoff} from './bash-receipt-handoff.mjs';
 import {reclaimSessionCapacity} from './session-capacity.mjs';
 import {sessionOutputTokens,assertOutputBudget,withoutOutputBudget} from './session-budget.mjs';
 import {automaticRecoveryRequest,automaticRecoveryIdentity} from './automatic-recovery.mjs';
@@ -169,22 +168,19 @@ export function sessionRelay(options, retained) {
       }
       const orphaned=[...sessions].filter(s=>s.affinityHash===affinityHash&&matchesSignature(s)).flatMap(session=>{
         const matchOptions={hashKey:store?.key,allowInstructionUpdates:options.liveInstructionUpdates===true};
-        const handoff=bashReceiptHandoff(session,request,matchOptions);
-        if(handoff)return [{session,delta:handoff.delta,receiptContext:handoff.context,representation:true}];
         const delta=unrequestedRecoveryDelta(session,request,matchOptions)||unrequestedToolRecoveryDelta(session,request,matchOptions);
         return delta?[{session,delta}]:[];
       });
       if(orphaned.length>1)throw recoveryError('RECOVERY_SESSION_AMBIGUOUS','未交付工具等待不能唯一关联原会话');
       if(orphaned.length){
-        const {session,delta,receiptContext,representation}=orphaned[0];let quarantine=session.quarantineRecord;
+        const {session,delta}=orphaned[0],quarantine=session.quarantineRecord;
         checkBudget(session);
         if(session.recoveryInProgress)throw recoveryError('SESSION_BUSY','正在取消原工具等待');
         session.recoveryInProgress=true;
         try{
-          if(representation&&session.state==='waiting-tool'){await session.freeze('BASH_RECEIPT_REPRESENTATION',{request});quarantine=session.quarantineRecord;}
           if(!quarantine||!await session.verifySuspended())throw recoveryError('NATIVE_PROCESS_GONE','原工具等待进程不可确认');
           // 不把缺少回传当作未执行；明确保留执行状态未知，不伪造工具结果。
-          const receipts=delta.filter(m=>m.role==='tool'),context=receiptContext||(receipts.length?{role:'user',content:stableJson({kind:'caller_completed_tool_handoff',ids:receipts.map(m=>m.tool_call_id),note:'The actual caller results were saved above. Continue the original caller task from those results; do not repeat completed operations.'})}:cancelledWaitContext(session));
+          const receipts=delta.filter(m=>m.role==='tool'),context=receipts.length?{role:'user',content:stableJson({kind:'caller_completed_tool_handoff',ids:receipts.map(m=>m.tool_call_id),note:'The actual caller results were saved above. Continue the original caller task from those results; do not repeat completed operations.'})}:cancelledWaitContext(session);
           await settleFrozenTools(session,receipts,{signal});
           const result=await session.run(request,[context,...recoveryInputMessages(delta)],{signal,onText,timing});
           await store?.releaseQuarantine(quarantine);
