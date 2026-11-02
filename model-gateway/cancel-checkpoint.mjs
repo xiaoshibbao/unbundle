@@ -1,4 +1,4 @@
-import {sessionHistory,historyKey,cancelledUserTextLength,splitCancelledUserMessage,transientRecap,replacementUserInput} from './session-history.mjs';
+import {sessionHistory,historyKey,cancelledUserTextLength,splitCancelledUserMessage,transientRecap,replacementUserInput,callerNoResponse} from './session-history.mjs';
 import {callerRuntimeStatus} from './runtime-status.mjs';
 
 // 取消确认只保存索引和 HMAC；不为恢复复制整段用户、工具或思考正文。
@@ -55,6 +55,7 @@ export function cancelledCheckpointDelta(row,request,{hashKey,allowInstructionUp
     // Desktop 的本地停止回执不是模型回复；只在已经确认取消的边界接受完整固定二元组。
     const plain=(m,role,text)=>m?.role===role&&m.content===text&&Object.keys(m).every(k=>['role','content'].includes(k));
     if(plain(delta[0],'user','[Request interrupted by user]')&&plain(delta[1],'assistant','No response requested.'))delta=delta.slice(2);
+    else if(callerNoResponse(delta[0]))delta=delta.slice(1);
     if(delta.some(m=>m.role==='user')&&delta.every(m=>m.role==='user'||callerRuntimeStatus(m)?.type==='environment'||allowInstructionUpdates&&['system','developer'].includes(m.role)))return delta;
   }
 }

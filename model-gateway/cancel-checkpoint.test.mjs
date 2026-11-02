@@ -33,7 +33,8 @@ test('取消后的目录重排、已确认收据缺失及已完成尾部省略�
  assert.deepEqual(check([user,call,receipt,next,env]),[next,env]);
  const missing={role:'tool',tool_call_id:'completed',content:'[Tool result missing due to internal error]',is_error:true};
  assert.deepEqual(check([user,call,missing,env,...ack,next]),[next]);assert.deepEqual(check([user,next,env]),[next,env]);
- for(const messages of [[{...user,content:'changed'},next],[user,call,{...receipt,content:'changed'},env,next],[user,call,{...missing,is_error:false},env,next],[user,call,receipt,env,ack[1],next],[user,call,receipt,env,ack[0],{...ack[1],content:'different'},next]])assert.equal(check(messages),undefined);
+ assert.deepEqual(check([user,call,receipt,env,ack[1],next]),[next]);
+ for(const messages of [[{...user,content:'changed'},next],[user,call,{...receipt,content:'changed'},env,next],[user,call,{...missing,is_error:false},env,next],[user,call,receipt,env,{...ack[1],content:'different'},next],[user,call,receipt,env,ack[0],{...ack[1],content:'different'},next]])assert.equal(check(messages),undefined);
  const unknown=cancelled(undefined,[]);unknown.history=s.history;assert.equal(cancelledCheckpointDelta({...unknown,cancellation:cancellationBoundary(unknown)},{messages:[user,call,missing,env,next],tools:[]},{hashKey,allowInstructionUpdates:true}),undefined);
  assert.equal(cancellationBoundary({...s,cancelConfirmed:false}),undefined);assert.equal(validCancellationBoundary({version:1,trailingEnvironment:false,receipts:[{index:-1,id:'bad'}]},4),false);
 });

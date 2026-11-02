@@ -2,6 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sessionHistory, historyKey, continuationDelta, continuationToolResults, assistantMessage, mcpToolResult } from './session-history.mjs';
 
+test('完整同ID收据之后的单条 Desktop 停止回执只作本地表示，不转给CLI或放宽其他助手消息',()=>{
+ const user={role:'user',content:'TASK'},answer=assistantMessage({tool_calls:['a','b'].map(id=>({id,type:'function',function:{name:'Read',arguments:'{}'}}))});
+ const receipts=['a','b'].map(tool_call_id=>({role:'tool',tool_call_id,content:'REAL'})),marker={role:'assistant',content:'No response requested.'},next={role:'user',content:'继续'};
+ const session={history:[historyKey(user)],expected:historyKey(answer),pendingIds:new Set(['a','b'])};
+ const request={messages:[user,answer,...receipts,marker,next]},before=JSON.stringify(request);
+ assert.deepEqual(continuationDelta(session,request),[...receipts,next]);assert.equal(JSON.stringify(request),before);
+ for(const delta of [[receipts[0],marker,next],[marker,...receipts,next],[...receipts,{...marker,content:'different'},next],[...receipts,{...marker,extra:true},next],[...receipts,marker]])assert.equal(continuationDelta(session,{messages:[user,answer,...delta]}),undefined);
+ const prefix=[user,...receipts];const cancelled={history:prefix.map(m=>historyKey(m)),request:{messages:prefix},interrupted:true,cancelConfirmed:true,pendingIds:new Set()};
+ assert.deepEqual(continuationDelta(cancelled,{messages:[...prefix,marker,next]}),[next]);
+ assert.equal(continuationDelta({...cancelled,cancelConfirmed:false},{messages:[...prefix,marker,next]}),undefined);
+});
+
 test('确认取消后拆分合并到末条 user 的新增文本；旧历史修改或未确认取消仍拒绝',()=>{
  const hashKey='synthetic-merged-cancel',user={role:'user',content:'原任务保持原样'},answer={role:'assistant',content:'上一轮已完成'},question={role:'user',content:'后来取消的问题'},suffix='\n\n停止后换个问题\n\n继续';
  const prior=[user,answer,question],session={request:{messages:prior},history:prior.map(m=>historyKey(m,{hashKey,exact:true})),pendingIds:new Set(),interrupted:true,cancelConfirmed:true};

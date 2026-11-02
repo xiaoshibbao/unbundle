@@ -1,4 +1,5 @@
 import {reclaimSessionCapacity} from './session-capacity.mjs';
+import {clientProbe} from './client-probe.mjs';
 import {pendingResponseReplay} from './pending-response-replay.mjs';
 import {resumeCli} from './process-freeze.mjs';
 import {sessionOutputTokens,assertOutputBudget,withoutOutputBudget} from './session-budget.mjs';
@@ -72,6 +73,15 @@ export function sessionRelay(options, retained) {
       const outputTokens = validateRequest(request, options);
       const compiled = compileContext(request, options);
       const model = typeof options.modelFor === 'function' ? options.modelFor(request.model) : options.model;
+      if(clientProbe(request,outputTokens,affinity)){
+        const probe=new NativeCliSession(request,compiled,{...options,model,outputTokens,persistentSessions:false,
+          onIdleSessionClosed:undefined,onCancelledSession:undefined,onInvalidateCheckpoint:undefined});
+        try{
+          await probe.start();
+          try{options.onSessionEvent?.({type:'native_client_probe',requestId:timing?.requestId,pooled:false});}catch{}
+          return await probe.run(request,undefined,{signal,onText,timing});
+        }finally{await probe.close('client_probe',{discardFrozen:true,immediateKill:true});}
+      }
       const matchKey = store?.key || key;
       const signatureFor = (outputTokens,toolsHash=compiled.metrics.toolsHash) => createHmac('sha256', matchKey).update(stableJson({ model, outputTokens,
         // 候选仅允许追加指令；旧前缀须逐字节匹配，旧规则修改仍不能复用。

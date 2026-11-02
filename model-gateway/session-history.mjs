@@ -12,6 +12,9 @@ export function runtimeStatus(message) {
     && /^\s*(?:<total_tokens>\d+ tokens left<\/total_tokens>\s*)+$/.test(value);
 }
 export function sessionHistory(messages) { return messages.filter(message => !runtimeStatus(message)); }
+// Desktop 本地停止回执，不冒充原生模型回复；只能在已核验的边界识别。
+export const callerNoResponse = message => message?.role==='assistant'&&message.content==='No response requested.'
+  &&Object.keys(message).every(k=>['role','content'].includes(k));
 // 客户端离开后自动发出的固定回顾请求，不是需要重新执行的用户任务。
 export function transientRecap(message) {
   return message?.role==='user'&&Object.keys(message).every(k=>['role','content'].includes(k))
@@ -143,6 +146,7 @@ export function continuationDelta(session, request, { allowInstructionUpdates = 
     let delta = messages.slice(prefix.length);
     const plain=(m,role,content)=>m?.role===role&&m.content===content&&Object.keys(m).every(k=>['role','content'].includes(k));
     if(session.cancelConfirmed===true&&plain(delta[0],'user','[Request interrupted by user]')&&plain(delta[1],'assistant','No response requested.'))delta=delta.slice(2);
+    else if(session.cancelConfirmed===true&&callerNoResponse(delta[0]))delta=delta.slice(1);
     if (!delta.some(message => message.role === 'user') || delta.some(message => message.role !== 'user'
       && !(callerRuntimeStatus(message)?.type === 'environment'
         || allowInstructionUpdates && ['system', 'developer'].includes(message.role)))) return reject('unsafe_interrupted_delta');
@@ -158,10 +162,19 @@ export function continuationDelta(session, request, { allowInstructionUpdates = 
     try { onAssistantMismatch?.(assistantDifference(session.expectedFingerprint,messages[prefix.length],{hashKey})); } catch {}
     return reject('assistant_message_mismatch');
   }
-  const delta = messages.slice(prefix.length + 1);
+  let delta = messages.slice(prefix.length + 1);
   const allowedUpdate = message => callerRuntimeStatus(message)?.type === 'environment'
     || allowInstructionUpdates && ['system', 'developer'].includes(message.role);
   if (session.pendingIds.size) {
+    const marker=delta.findIndex(callerNoResponse);
+    if(marker>=0){
+      const before=delta.slice(0,marker),receipts=before.filter(m=>m.role==='tool'),ids=new Set(receipts.map(m=>m.tool_call_id));
+      // 只识别全部同 ID 真实收据之后、下一条用户输入之前的单条本地标记。
+      // 旧原请求仍原样记账；传给 CLI 的增量不包含伪助手回复。
+      if(receipts.length===session.pendingIds.size&&ids.size===receipts.length&&[...ids].every(id=>session.pendingIds.has(id))
+        &&before.every(m=>m.role==='tool'||callerRuntimeStatus(m)?.type==='environment')
+        &&delta.slice(marker+1).some(m=>m.role==='user'))delta=delta.filter((_,i)=>i!==marker);
+    }
     const tools = delta.filter(message => message.role === 'tool');
     if (tools.length !== session.pendingIds.size) return reject('tool_result_count_mismatch');
     // Desktop 会在图片工具结果后另附 user 角色的尺寸注释。只接受固定格式的

@@ -21,6 +21,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  const frame=JSON.parse(line);
  if(frame.type==='control_request'&&frame.request.subtype==='mcp_set_servers'){emit({type:'control_response',response:{request_id:frame.request_id,subtype:'success',response:{added:Object.keys(frame.request.servers)}}});return;}
  if(mode==='aggregate')emit({type:'system',subtype:'api_retry',attempt:1});else start('initial');
+ if(mode==='client-probe'){emit({type:'result',is_error:false,result:'P'});return;}
  const tools=[{type:'tool_use',id:'native_1',name:'mcp__omp__Read',input:mode==='reordered'?{options:{limit:5,offset:0},path:'first'}:{path:'first'}}];
  if(mode==='bash-alias')tools[0]={type:'tool_use',id:'native_1',name:'mcp__omp__Bash',input:{command:'cd /e/project && synthetic-only',description:'same'}};
  if(mode==='unicode'||mode==='unicode-mismatch'){tools[0]={type:'tool_use',id:'native_1',name:'mcp__omp__Write',input:{path:'first',content:String.fromCharCode(0x2019)}};emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'native_1',name:'mcp__omp__Write',input:{}}}});emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify({path:'first',content:String.fromCharCode(92)+'u2019'})}}});}
@@ -53,7 +54,7 @@ async function setup(mode, overrides={}) {
     requireLiveToolContinuation: true, maxSessions: 1, ...overrides,
     onSessionEvent: value => records.push(value),
     spawnProcess: (_cli, args, options) => { spawns++; return spawn(process.execPath,
-      ['--input-type=module', '-e', script, args[args.indexOf('--mcp-config') + 1], mode,String(overrides.mockMcpDelayMs||0)], options); } },{sessions});
+      ['--input-type=module', '-e', script, args[args.indexOf('--mcp-config') + 1], args[args.indexOf('--model')+1]==='claude-haiku-5-5'?'client-probe':mode,String(overrides.mockMcpDelayMs||0)], options); } },{sessions});
   return { relay, records, sessions, spawns: () => spawns, async close() { await relay.close({discardFrozen:true}); await fs.rm(home, { recursive: true, force: true }); } };
 }
 
@@ -138,6 +139,20 @@ test('容量已满时保留正在等待长工具的会话，拒绝挤占并接�
     assert.equal((await state.relay.infer(next)).content,'DONE');
     assert.equal(state.spawns(), 1);
   } finally { await state.close({discardFrozen:true}); }
+});
+
+test('Desktop句点启动探测走独立CLI，不淘汰已满池中的空闲用户会话',async()=>{
+ const state=await setup('serial',{modelFor:model=>model});
+ try{
+  const first=await state.relay.infer(request),session=[...state.sessions][0],pid=session.child.pid;
+  const completed={...request,messages:[...request.messages,assistantMessage(first),...first.tool_calls.map(c=>({role:'tool',tool_call_id:c.id,content:'REAL_RESULT'}))]};
+  const done=await state.relay.infer(completed);assert.equal(done.content,'DONE');assert.equal(session.state,'idle');
+  const probe={model:'claude-haiku-5-5',max_tokens:1,messages:[{role:'user',content:'.'}]};
+  assert.equal((await state.relay.infer(probe)).content,'P');assert.equal(state.sessions.size,1);assert(state.sessions.has(session));assert.equal(session.state,'idle');assert.equal(session.child.pid,pid);
+  const follow={...request,messages:[...completed.messages,assistantMessage(done),{role:'user',content:'NEXT'}]};
+  assert.equal((await state.relay.infer(follow)).tool_calls.length,2);assert.equal(state.spawns(),2);
+  assert(state.records.some(r=>r.type==='native_client_probe'&&r.pooled===false));
+ }finally{await state.close();}
 });
 
 test('无 Desktop 请求时的新模型消息立即使原生会话失效', async () => {
