@@ -110,3 +110,28 @@ test('拒绝结束原CLI后保存原生检查点，下条消息同UUID resume而
  try{relay=sessionRelay(options);const refused=await relay.infer(first);assert.equal(refused.stop_reason,'refusal');const follow=await relay.infer({...first,messages:[...first.messages,{role:'assistant',content:'DECLINED'},{role:'user',content:'NEW_INPUT'}]});assert.equal(follow.content,'AFTER_REFUSAL');assert.equal(argsSeen.length,2);assert.equal(argsSeen[1][argsSeen[1].indexOf('--resume')+1],argsSeen[0][argsSeen[0].indexOf('--session-id')+1]);assert.equal(inputs.length,2);assert(!JSON.stringify(inputs[1]).includes('ORIGINAL_PRIVATE_TASK'));}
  finally{await relay?.close({discardFrozen:true});await fs.rm(home,{recursive:true,force:true});}
 });
+
+
+test('拒绝时残留真实 MCP 等待不阻断退出后的检查点，后续同 UUID 原生恢复',async()=>{
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'refusal-mcp-resume-')),sessions=new Set(),argsSeen=[],inputs=[];let relay;
+ const fake=`import fs from 'node:fs';import readline from 'node:readline';const send=x=>console.log(JSON.stringify(x)),id=process.env.SYNTHETIC_ID,file=process.env.SYNTHETIC_FILE;send({type:'system',subtype:'init',session_id:id});
+ readline.createInterface({input:process.stdin}).on('line',line=>{const frame=JSON.parse(line);
+ if(frame.type==='fixture_refusal'){fs.appendFileSync(file,JSON.stringify({type:'assistant',message:{role:'assistant',content:[{type:'text',text:'DECLINED'}],stop_reason:'refusal'}})+'\\n');send({type:'assistant',message:{id:'declined',content:[{type:'text',text:'DECLINED'}],stop_reason:'refusal',usage:{input_tokens:1,output_tokens:1}}});return;}
+ if(frame.type!=='user')throw Error('unexpected frame');fs.appendFileSync(file,JSON.stringify(frame)+'\\n');
+ if(process.env.SYNTHETIC_RESUME==='1'){send({type:'result',result:'AFTER_REFUSAL',is_error:false});return;}
+ const config=JSON.parse(fs.readFileSync(process.env.SYNTHETIC_MCP,'utf8')).mcpServers.omp;
+ fetch(config.url,{method:'POST',headers:{...config.headers,'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'read',arguments:{},_meta:{'claudecode/toolUseId':'unexecuted'}}})}).catch(()=>{});
+ });`;
+ const options={home,cli:'synthetic',model:'synthetic',persistentSessions:true,maxOutputTokens:1024,timeoutMs:10000,
+ spawnProcess(_cli,args,o){argsSeen.push(args);const resumed=args.includes('--resume'),id=args[args.indexOf(resumed?'--resume':'--session-id')+1],file=path.join(home,'.claude','projects','synthetic',id+'.jsonl');fsSync.mkdirSync(path.dirname(file),{recursive:true});if(!resumed)fsSync.writeFileSync(file,'');
+ const child=spawn(process.execPath,['--input-type=module','-e',fake],{...o,env:{...o.env,SYNTHETIC_ID:id,SYNTHETIC_FILE:file,SYNTHETIC_RESUME:resumed?'1':'0',SYNTHETIC_MCP:args[args.indexOf('--mcp-config')+1]}});const write=child.stdin.write.bind(child.stdin);child.stdin.write=(data,...rest)=>{if(JSON.parse(data).type==='user')inputs.push(JSON.parse(data));return write(data,...rest);};return child;}};
+ const first={model:'synthetic',max_tokens:1024,messages:[{role:'user',content:'PRIVATE_TASK'}],tools:[tool]};
+ try{relay=sessionRelay(options,{sessions});const pending=relay.infer(first);
+ let session;for(let i=0;i<200;i++){session=[...sessions][0];if(session?.pendingHttp.size===1)break;await new Promise(r=>setTimeout(r,10));}
+ assert.equal(session.pendingHttp.size,1);session.child.stdin.write(JSON.stringify({type:'fixture_refusal'})+'\n');
+ const refused=await pending;assert.equal(refused.stop_reason,'refusal');assert.equal(refused.tool_calls,undefined);await session.closing;assert.equal(session.pendingHttp.size,0);
+ const rows=JSON.parse(await fs.readFile(path.join(home,'native-session-index','index.json'),'utf8'));assert(rows.some(r=>r.id===session.nativeSessionId));
+ const result=await relay.infer({...first,messages:[...first.messages,{role:'assistant',content:'DECLINED'},{role:'user',content:'NEW_INPUT'}]});
+ assert.equal(result.content,'AFTER_REFUSAL');assert.equal(argsSeen.length,2);assert.equal(argsSeen[1][argsSeen[1].indexOf('--resume')+1],session.nativeSessionId);assert.equal(inputs.length,2);assert(!JSON.stringify(inputs[1]).includes('PRIVATE_TASK'));
+ }finally{await relay?.close({discardFrozen:true});await fs.rm(home,{recursive:true,force:true});}
+});

@@ -562,6 +562,11 @@ export class NativeCliSession {
       if (this.child && this.child.exitCode === null && this.child.signalCode === null) {
         let timer; await Promise.race([new Promise(r => this.child.once('close', r)), new Promise(r => { timer = setTimeout(() => { kill('SIGKILL'); r(); }, 2000); })]); clearTimeout(timer);
       }
+      // 拒绝已终止整轮且未向 Desktop 交付本轮工具。等原进程确认退出后，
+      // 先清掉失效的 MCP 连接引用，再保存拒绝回复的原生检查点；不回传假结果。
+      if(cleanIdle&&this.lastStopReason==='refusal'){
+        this.server?.closeAllConnections();this.pendingHttp.clear();
+      }
       if(cleanIdle)try{await this.options.onIdleSessionClosed?.(this);}catch{this.report('checkpoint_refresh_failed','CHECKPOINT_WRITE_FAILED');}
       this.server?.closeAllConnections(); if (this.server?.listening) await new Promise(r => this.server.close(r));
       if (this.work) { await fs.rm(path.join(this.work, 'mcp.json'), { force: true }); await fs.rm(path.join(this.work, 'system.txt'), { force: true }); if (this.resumeFile) await fs.rm(this.resumeFile, { force: true }); await fs.rmdir(this.work).catch(() => {}); }
