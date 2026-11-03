@@ -116,3 +116,12 @@ test('正常正文中的额度引用不触发冷却，未知错误仍返回原�
     assert.equal(executions, 3);
   } finally { await app.close({discardFrozen:true}); }
 });
+
+test('新版 CLI 的 5-hour limit 与 UTC 重置时间正确归类',()=>{
+ const now=Date.parse('2026-11-03T14:00:00Z');
+ const error=sessionQuotaFailure("You've hit your 5-hour limit · resets 4:20pm (UTC)",{},now);
+ assert.equal(error.code,'SESSION_LIMIT');assert.equal(error.expiresAt,Date.parse('2026-11-03T16:20:00Z'));
+ for(const text of ["You've hit your 5-hour limit", "You've hit your session limit"])assert.equal(sessionQuotaFailure(text).code,'SESSION_LIMIT');
+ assert.equal(sessionQuotaFailure("The tool printed: You've hit your 5-hour limit"),undefined);
+ assert.equal(sessionQuotaFailure("You've hit your 5-hour limitlessness"),undefined);
+});

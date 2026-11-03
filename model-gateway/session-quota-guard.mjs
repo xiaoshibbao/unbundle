@@ -2,8 +2,8 @@ import { terminalNotice } from './empty-output-guard.mjs';
 
 // 仅从 CLI 的失败结果识别账户会话额度；正文引用和普通 429/网络错误不进入此分支。
 export function sessionQuotaFailure(message, statistics = {}, now = Date.now()) {
-  if (typeof message !== 'string' || !/^You've hit your session limit\b/.test(message)) return undefined;
-  const reset = message.match(/\bresets\s+(\d{1,2}):(\d{2})(am|pm)\s+\(([A-Za-z_]+\/[A-Za-z_]+(?:\/[A-Za-z_]+)?)\)/i);
+  if (typeof message !== 'string' || !/^You've hit your (?:session|5-hour) limit\b/.test(message)) return undefined;
+  const reset = message.match(/\bresets\s+(\d{1,2}):(\d{2})(am|pm)\s+\((UTC|[A-Za-z_]+\/[A-Za-z_]+(?:\/[A-Za-z_]+)?)\)/i);
   let expiresAt = now + 60000, resetLabel;
   if (reset) {
     const [, hour, minute, period, zone] = reset;
