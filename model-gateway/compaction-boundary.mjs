@@ -73,13 +73,34 @@ export function compactionBoundary(session,request,{hashKey,onReject}={}) {
 export function desktopSummary(value) {
  return value.replace(/<analysis>[\s\S]*?<\/analysis>/,'').replace(/<summary>([\s\S]*?)<\/summary>/,(_,body)=>`Summary:\n${body.trim()}`).replace(/\n\n+/g,'\n\n').trim();
 }
+// 仅登记已进入真实压缩源的工具批次；索引保存 HMAC，不保存工具输出正文。
+export function retainedToolPairs(messages,options={}){
+ const source=conversation(messages),pairs=[];
+ for(let i=0;i<source.length;i++){
+  const a=source[i],calls=a.tool_calls;if(a.role!=='assistant'||!calls?.length||calls.length>32)continue;
+  const tools=source.slice(i+1,i+1+calls.length);
+  if(tools.length!==calls.length||new Set(calls.map(c=>c.id)).size!==calls.length||tools.some((m,j)=>m.role!=='tool'||m.tool_call_id!==calls[j].id||typeof m.content!=='string'))continue;
+  pairs.push({assistant:historyKey(a,options),tools:tools.map(m=>({id:m.tool_call_id,hash:historyKey({...m,content:m.content.trim()},options)}))});
+ }
+ return pairs.slice(-32);
+}
+function retainedReceipt(message,options){
+ if(message?.role!=='tool'||typeof message.content!=='string')return;
+ let content=message.content,memory;
+ const at=content.lastIndexOf('\n\n<system-reminder>\nCodebase and user instructions are shown below.');
+ if(at>=0){
+  const extra=content.slice(at+2),parsed=splitCompactMemory(extra+'\n\n'+SUMMARY_HEADER+'\n\nx',SUMMARY_HEADER);
+  if(!parsed?.memory)return;memory=parsed.memory;content=content.slice(0,at);
+ }
+ return{hash:historyKey({...message,content:content.trim()},options),memory};
+}
 export function compactionRecord(session,request,result,{hashKey,sourceAssistantHash}={}) {
  if(typeof result.content!=='string'||!result.content.trim()||result.tool_calls?.length)return;
  const payload=desktopSummary(result.content);if(!payload)return;
  const options={hashKey,toolSchemas:session.request.tools};
  const source=conversation(request.messages).slice(0,-1).map(m=>historyKey(m,options));
  if(sourceAssistantHash&&source.at(-1)!==sourceAssistantHash)source.push(sourceAssistantHash);
- return {version:1,nativeCommitted:Boolean(session.nativeCompactionCommit?.boundaryUuid),nativeBoundaryUuid:session.nativeCompactionCommit?.boundaryUuid,summaryHash:historyKey({role:'user',content:payload},{hashKey,exact:true}),summaryLength:payload.length,
+ return {retainedToolPairs:retainedToolPairs(request.messages.slice(0,-1),options),version:1,nativeCommitted:Boolean(session.nativeCompactionCommit?.boundaryUuid),nativeBoundaryUuid:session.nativeCompactionCommit?.boundaryUuid,summaryHash:historyKey({role:'user',content:payload},{hashKey,exact:true}),summaryLength:payload.length,
   source,...(sourceAssistantHash?{sourceAssistantHash}:{}),
   systems:leading(session.request.messages).map(m=>historyKey(m,{hashKey,exact:true}))};
 }
@@ -100,12 +121,23 @@ export function compactedDelta(session,request,{hashKey}={}) {
  for(let n=Math.min(record.source.length,remaining.length);n>0;n--){
   if(record.source.slice(-n).every((h,i)=>h===historyKey(remaining[i],options))){retained=n;break;}
  }
+ const retainedMemory=[];
+ // Desktop 保留窗口可落在摘要源中间，且会 trim 旧结果、重附自动记忆。
+ // 只消化已登记、同 ID 同顺序同正文的完整批次，记忆单独交给原生 CLI。
+ while(retained<remaining.length){
+  const assistant=remaining[retained],hash=historyKey(assistant,options),pair=(record.retainedToolPairs||[]).find(p=>p.assistant===hash);
+  if(!pair)break;
+  const receipts=remaining.slice(retained+1,retained+1+pair.tools.length),parsed=receipts.map(m=>retainedReceipt(m,options));
+  if(receipts.length!==pair.tools.length||receipts.some((m,i)=>m.tool_call_id!==pair.tools[i].id||parsed[i]?.hash!==pair.tools[i].hash))break;
+  for(const r of parsed)if(r.memory)retainedMemory.push({role:'user',content:'Caller auto-memory snapshot attached to a retained completed tool result during compaction (caller context):\n'+r.memory});
+  retained+=pair.tools.length+1;
+ }
  const fresh=remaining.slice(retained);
  if(fresh.some(m=>m.role!=='user'))return;
  // 摘要包装自身的继续要求仍作为真实用户输入交给 CLI；旧工具和保留尾部不重放。
  const suffix=content.slice(start+record.summaryLength).trim();
  const head=record.nativeCommitted?(suffix?[{role:'user',content:'Caller continuation metadata after compaction:\n'+suffix}]:[]):[wrapper];
  const memory=split.memory?[{role:'user',content:'Caller auto-memory snapshot supplied with the compacted conversation (caller context):\n'+split.memory}]:[];
- const delta=[...memory,...head,...fresh,...request.messages.filter(m=>['system','developer'].includes(m.role)&&!systems.includes(m))];
+ const delta=[...memory,...head,...retainedMemory,...fresh,...request.messages.filter(m=>['system','developer'].includes(m.role)&&!systems.includes(m))];
  return delta.length?delta:record.nativeCommitted?[{role:'user',content:'Continue the current task from the preserved native context.'}]:[wrapper];
 }

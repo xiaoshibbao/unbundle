@@ -14,3 +14,15 @@ test('附加记忆不能绕过摘要、系统规则、保留回复和包装校�
  assert.equal(compactedDelta(setup(),{messages:[{...rules,content:'changed'},...request().messages.slice(1)]}),undefined);
  const changed=request();changed.messages[2]={...reply,content:'changed'};assert.equal(compactedDelta(setup(),changed),undefined);
 });
+
+test('保留窗口中的完成工具批次允许已观察的 trim 与自动记忆，真实结果仍严格核对',()=>{
+ const call={role:'assistant',content:null,tool_calls:[{id:'completed',type:'function',function:{name:'Bash',arguments:'{"command":"synthetic"}'}}]},receipt={role:'tool',tool_call_id:'completed',content:'  EXACT_RESULT\n'};
+ const session={request:{messages:[rules,user]},pendingIds:new Set(),nativeCompactionCommit:{boundaryUuid:'saved'}};
+ session.compaction=compactionRecord(session,{messages:[user,call,receipt,reply,{role:'user',content:'summary request'}]},{content:'<summary>VERIFIED_SUMMARY</summary>'});
+ const incoming={messages:[rules,{role:'user',content:summary},call,{...receipt,content:'EXACT_RESULT\n\n'+prefix},{role:'user',content:'continue'}]};
+ const delta=compactedDelta(session,incoming);assert(delta);assert(delta.some(m=>m.content.endsWith(prefix)));assert.equal(delta.at(-1).content,'continue');assert(!delta.some(m=>m.role==='tool'||m.role==='assistant'));assert(!JSON.stringify(session.compaction).includes('EXACT_RESULT'));
+ for(const patch of [{content:'DIFFERENT\n\n'+prefix},{tool_call_id:'another'},{content:'EXACT_RESULT\n\n'+prefix.replace('MEMORY.md','other.txt')}]){
+  const bad=structuredClone(incoming);bad.messages[3]={...bad.messages[3],...patch};assert.equal(compactedDelta(session,bad),undefined);
+ }
+ const bad=structuredClone(incoming);bad.messages[2].tool_calls[0].function.arguments='{"command":"changed"}';assert.equal(compactedDelta(session,bad),undefined);
+});
