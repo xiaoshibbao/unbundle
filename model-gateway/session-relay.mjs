@@ -177,6 +177,8 @@ export function sessionRelay(options, retained) {
           session.quarantineRecord=undefined;session.freezeReason=undefined;session.frozenRequest=undefined;session.recoveryArmed=false;
         }else await update();
         session.pendingReplyBase={expected:session.expected,history:replay.base};
+        // 重试同一占位请求不重复排队；前缀内的原用户消息仍保留在 Desktop 历史。
+        session.pendingReplyUserMessages=replay.userMessages;
         session.request=request;session.history=replay.history;session.lastUsed=Date.now();
         try{options.onSessionEvent?.({type:'native_tool_response_replayed',sessionId:session.sessionId,requestId:timing?.requestId,model_requests:0,toolCalls:replay.assistant.tool_calls.length,nativeProcessPreserved:true});}catch{}
         return {...replay.assistant,usage_complete:true,upstream_usage:{input_tokens:0,output_tokens:0,cache_creation_input_tokens:0,cache_read_input_tokens:0},usage:{prompt_tokens:0,completion_tokens:0,total_tokens:0}};

@@ -30,3 +30,14 @@ test('已交回部分结果、MCP断开、原调用变化及其他冻结原因�
  const frozen={...f.session,state:'frozen',freezePreviousState:'waiting-tool',freezeReason:'ASSISTANT_MESSAGE_MISMATCH'};
  assert(pendingResponseReplay(frozen,f.request));
 });
+
+test('蓝屏占位符仅在完整旧历史与原 MCP 等待一致时重传，并保留用户补充',()=>{
+ const f=fixture(),marker={role:'assistant',content:'No response requested.'},user={role:'user',content:'请先解释当前状态，然后继续'};
+ const request={messages:[...f.prefix,marker,user]};
+ const result=pendingResponseReplay(f.session,request);assert.deepEqual(result.userMessages,[user]);
+ assert.deepEqual(result.assistant,f.assistant);
+ for(const tail of [[marker],[marker,user,{role:'tool',tool_call_id:'pending',content:'DONE'}],[marker,user,marker],
+  [{role:'assistant',content:'different'},user]])assert.equal(pendingResponseReplay(f.session,{messages:[...f.prefix,...tail]}),undefined);
+ assert.equal(pendingResponseReplay({...f.session,history:[historyKey({role:'user',content:'other'})]},request),undefined);
+ assert.equal(pendingResponseReplay({...f.session,pendingHttp:new Map()},request),undefined);
+});

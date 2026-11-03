@@ -25,7 +25,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  const tools=[{type:'tool_use',id:'native_1',name:'mcp__omp__Read',input:mode==='reordered'?{options:{limit:5,offset:0},path:'first'}:{path:'first'}}];
  if(mode==='bash-alias')tools[0]={type:'tool_use',id:'native_1',name:'mcp__omp__Bash',input:{command:'cd /e/project && synthetic-only',description:'same'}};
  if(mode==='unicode'||mode==='unicode-mismatch'){tools[0]={type:'tool_use',id:'native_1',name:'mcp__omp__Write',input:{path:'first',content:String.fromCharCode(0x2019)}};emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'native_1',name:'mcp__omp__Write',input:{}}}});emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:JSON.stringify({path:'first',content:String.fromCharCode(92)+'u2019'})}}});}
- if(mode==='serial')tools.push({type:'tool_use',id:'native_2',name:'mcp__omp__Write',input:{path:'second'}});
+ if(mode==='serial'||mode==='placeholder')tools.push({type:'tool_use',id:'native_2',name:'mcp__omp__Write',input:{path:'second'}});
  emit({type:'assistant',message:{id:'initial',content:tools,...(mode==='aggregate'?{stop_reason:'tool_use',usage:{input_tokens:2,output_tokens:3}}:{})}});
  if(mode==='unicode'||mode==='unicode-mismatch')emit({type:'stream_event',event:{type:'content_block_stop',index:0}});
  if(mode!=='aggregate')emit({type:'stream_event',event:{type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:1}}});
@@ -38,7 +38,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   if(!response.ok)return;
   const receipt=await response.json();
   if(mode==='bash-alias'&&JSON.stringify(receipt.result)!==JSON.stringify({content:[{type:'text',text:'ACTUAL_RESULT'}]}))throw Error('RESULT WAS MODIFIED');
-  if(mode==='serial'){const second=await call('native_2','Write','second');if(!second.ok)return;await second.json();}
+  if(mode==='placeholder'&&JSON.stringify(receipt.result).split('USER_AFTER_CRASH').length!==2)throw Error('USER MESSAGE LOST OR DUPLICATED');
+  if(mode==='serial'||mode==='placeholder'){const second=await call('native_2','Write','second');if(!second.ok)return;await second.json();}
   start('continued');
   emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'DONE'}}});
   emit({type:'stream_event',event:{type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:2}}});
@@ -281,4 +282,17 @@ test('流片段中的字面 Unicode 转义不覆盖完整 Write 参数，须与�
 
 test('完整 Write 参数与真实 MCP 不一致时仍拒绝交付 Desktop',async()=>{
  const state=await setup('unicode-mismatch');try{await assert.rejects(state.relay.infer(request),{code:'NATIVE_TOOL_ID_MISMATCH'});assert.equal(state.spawns(),1);}finally{await state.close();}
+});
+
+test('蓝屏占位回复重传保留用户补充，真实结果仍交回同一 CLI 一次',async()=>{
+ const state=await setup('placeholder',{liveInstructionUpdates:true});
+ try{
+  const first=await state.relay.infer(request),session=[...state.sessions][0],pid=session.child.pid;
+  const retry={...request,messages:[...request.messages,{role:'assistant',content:'No response requested.'},{role:'user',content:'USER_AFTER_CRASH'}]};
+  const replay=await state.relay.infer(retry);assert.deepEqual(replay.tool_calls,first.tool_calls);
+  assert.equal((await state.relay.infer(retry)).upstream_usage.input_tokens,0);
+  const delivered={...retry,messages:[...retry.messages,assistantMessage(replay),...replay.tool_calls.map(c=>({role:'tool',tool_call_id:c.id,content:'REAL_RESULT'}))]};
+  assert.equal((await state.relay.infer(delivered)).content,'DONE');
+  assert.equal(session.child.pid,pid);assert.equal(state.spawns(),1);assert.equal(session.pendingReplyUserMessages,undefined);
+ }finally{await state.close();}
 });

@@ -1,4 +1,4 @@
-import {historyKey,sessionHistory} from './session-history.mjs';
+import {historyKey,sessionHistory,callerNoResponse} from './session-history.mjs';
 
 // 重传已生成的工具回复，不重新推理。只接受完整原请求或其后的纯“继续”控制；
 // 回传过助手/工具结果、参数或旧历史有变化时，不用重传掩盖执行状态差异。
@@ -17,10 +17,14 @@ export function pendingResponseReplay(session,request,{hashKey,allowInstructionU
  const messages=sessionHistory(request.messages);
  if(!base.length||messages.length<base.length||!base.every((h,i)=>historyKey(messages[i],{hashKey,exact:allowInstructionUpdates,toolSchemas})===h))return;
  const tail=messages.slice(base.length);
- if(tail.length>16||tail.some(m=>!(allowInstructionUpdates&&['system','developer'].includes(m.role))
-  &&(m.role!=='user'||typeof m.content!=='string'||! /^(?:继续\s*){1,8}$/.test(m.content.trim())
+ // 崩溃重连可能只留下本地占位回复；真实用户补充延迟至原工具结果交回时送入 CLI。
+ const placeholder=callerNoResponse(tail[0]);
+ const remaining=placeholder?tail.slice(1):tail;
+ if(placeholder&&(!remaining.some(m=>m.role==='user')||remaining.some(m=>m.role==='assistant'||m.role==='tool')))return;
+ if(tail.length>16||remaining.some(m=>!(allowInstructionUpdates&&['system','developer'].includes(m.role))
+  &&(m.role!=='user'||typeof m.content!=='string'||!(placeholder?m.content.trim()&&Buffer.byteLength(m.content)<=65536:/^(?:继续\s*){1,8}$/.test(m.content.trim()))
     ||Object.keys(m).some(k=>!['role','content'].includes(k)))))return;
  // 真实追加指令必须经原生控制通道确认，不能因重传而丢掉目录、文件变化提醒。
  const updates=tail.filter(m=>['system','developer'].includes(m.role));
- return {assistant:structuredClone(assistant),updates,base:[...base],history:messages.map(m=>historyKey(m,{hashKey,exact:allowInstructionUpdates,toolSchemas})),frozen};
+ return {assistant:structuredClone(assistant),updates,userMessages:placeholder?remaining.filter(m=>m.role==='user'):[],base:[...base],history:messages.map(m=>historyKey(m,{hashKey,exact:allowInstructionUpdates,toolSchemas})),frozen};
 }

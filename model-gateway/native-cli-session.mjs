@@ -312,7 +312,8 @@ export class NativeCliSession {
         if (delta === undefined) this.writeUser(this.initialInput, turn);
         else if (this.pendingIds.size) {
           turn.inputUuid = this.inputUuid;
-          this.results = continuationToolResults(delta, this.options.maxImageBytes || 5242880);
+          this.results = continuationToolResults([...(this.pendingReplyUserMessages||[]),...delta], this.options.maxImageBytes || 5242880);
+          this.pendingReplyUserMessages=undefined;
           this.flush();
         } else {
           // 后续用户附件仍需原生 image 块，不能把 base64 当普通 JSON 文本。
