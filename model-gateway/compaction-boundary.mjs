@@ -25,11 +25,17 @@ export function compactionIntent(request) {
  const summaryIndex=systems.findIndex(m=>summarySystem(m.content));
  if(systems.filter(m=>summarySystem(m.content)).length>1)return;
  if(request.tool_choice&&request.tool_choice!=='none'&&request.tool_choice!=='auto')return;
- const messages=conversation(request.messages),prompt=messages.at(-1),content=text(prompt);
+ const messages=conversation(request.messages),prompt=messages.at(-1);let content=text(prompt),prefix;
+ // CLI 手动压缩会与末条用户文本合并；分离固定摘要指令，原用户前缀仍参与历史匹配。
+ if(typeof content==='string'&&!content.startsWith('CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n')&&!content.startsWith('Your task is to create a detailed summary of ')){
+  const markers=['CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n','Your task is to create a detailed summary of '];
+  const cuts=markers.map(marker=>content.indexOf('\n\n'+marker)).filter(at=>at>=0);
+  if(cuts.length){const at=Math.min(...cuts);prefix={role:'user',content:content.slice(0,at)};content=content.slice(at+2);}
+ }
  if(prompt?.role!=='user'||typeof content!=='string'
   ||!(content.startsWith('Your task is to create a detailed summary of ')||content.startsWith('CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n'))
   ||!/(?:^|\n)Your task is to create a detailed summary of (?:the conversation so far,|this conversation\.)/.test(content))return;
- return {messages:messages.slice(0,-1),prompt:{...prompt,content},rules:summaryIndex>=0?systems.slice(0,summaryIndex):leading(request.messages),ordinary:summaryIndex<0};
+ return {messages:[...messages.slice(0,-1),...(prefix?[prefix]:[])],prompt:{...prompt,content},rules:summaryIndex>=0?systems.slice(0,summaryIndex):leading(request.messages),ordinary:summaryIndex<0};
 }
 export function compactionBoundary(session,request,{hashKey,onReject}={}) {
  const reject=reason=>{onReject?.(reason);return undefined;};

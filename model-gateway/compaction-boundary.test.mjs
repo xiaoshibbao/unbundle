@@ -37,3 +37,11 @@ test('失败的本地 compact 命令记录作为新增用户上下文保留，�
  assert.deepEqual(compactionBoundary(session,actual),{prompt,receipts:[],additionalUsers:[local]});
  assert.equal(compactionBoundary(session,{...actual,messages:[...request.messages.slice(0,-1),{role:'assistant',content:'unverified branch'},prompt]}),undefined);
 });
+
+test('手动压缩合并末条用户文本时保留原前缀，仍严格验证历史',()=>{
+ const instruction='CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n'+prompt.content;
+ const req={model:'test',messages:[system,user,{role:'user',content:'继续\n\n'+instruction}]};
+ const intent=compactionIntent(req);assert.deepEqual(intent.messages,[user,{role:'user',content:'继续'}]);assert.equal(intent.prompt.content,instruction);
+ const normal=compactionIntent({...req,messages:[system,user,{role:'user',content:instruction}]});assert.deepEqual(normal.messages,[user]);
+ assert.equal(compactionIntent({...req,messages:[system,user,{role:'user',content:'继续\n\nYour task is to create a detailed summary of unrelated data'}]}),undefined);
+});
