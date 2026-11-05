@@ -37,6 +37,7 @@ export class NativeSessionStore {
         && (row.interrupted===true?row.expected===undefined&&validCancellationBoundary(row.cancellation,row.history?.length):hash.test(row.expected))
         && Array.isArray(row.history) && row.history.every(value => hash.test(value))
         && (row.completedRecap===undefined||row.completedRecap===true)
+        && (row.effort===undefined||['auto','low','medium','high','xhigh','max'].includes(row.effort))
         && (row.toolSchemaHash===undefined||hash.test(row.toolSchemaHash))
         && (row.toolCatalog===undefined||validToolCatalog(row.toolCatalog))
         && (row.verifiedToolResults===undefined || Array.isArray(row.verifiedToolResults)&&row.verifiedToolResults.length>0&&row.verifiedToolResults.length<=32
@@ -114,7 +115,7 @@ export class NativeSessionStore {
       memoryAliases:compactMemoryAliases(messages,{hashKey:this.key,toolSchemas:session.request.tools}).map(({index,hash})=>({index,hash})),
       conversation:[...sessionHistory(messages).filter(m=>!['system','developer'].includes(m.role)),session.lastAssistant].map(m=>historyKey(m,{hashKey:this.key,toolSchemas:session.request.tools}))}:undefined;
     this.records.set(session.nativeSessionId, { id: session.nativeSessionId, signature: session.signature,outputTokens:sessionOutputTokens(session),compactSource,
-      toolSchemaHash:session.compiled?.metrics?.toolsHash,toolCatalog:session.compiled?.available?toolCatalog(session.compiled.available):undefined,
+      effort:session.request.reasoning_effort||'auto',toolSchemaHash:session.compiled?.metrics?.toolsHash,toolCatalog:session.compiled?.available?toolCatalog(session.compiled.available):undefined,
       historyNormalization: session.historyNormalization, affinityHash: session.affinityHash, history: [...session.history], expected: session.expected, compaction:session.compaction, snapshot, savedAt: Date.now(),
       ...(cancellation?{interrupted:true,cancellation}:{}),
       ...(completedRecapBoundary(session,{hashKey:this.key,toolSchemas:session.request.tools})?{completedRecap:true}:{}) });
@@ -187,14 +188,16 @@ export class NativeSessionStore {
     }catch { /* 已封存索引；磁盘错误不允许恢复推理。 */ }
     return result;
   }
-  async take(request, signature, allowInstructionUpdates, affinityHash, {consume=true,signatureFor,requestedOutputTokens,keepNativeOutputBudget=false,requestedToolCatalog}={}) {
+  async take(request, signature, allowInstructionUpdates, affinityHash, {consume=true,signatureFor,requestedOutputTokens,keepNativeOutputBudget=false,requestedToolCatalog,requestedEffort}={}) {
     await this.ready;
     for (const row of this.records.values()) {
       if (row.affinityHash !== affinityHash) continue;
       const actual = sessionOutputTokens(row) ?? (row.signature === signature ? requestedOutputTokens : undefined);
       const oldToolsHash=row.toolSchemaHash||row.compactSource?.toolsHash;
       const catalogExpanded=signatureFor&&actual!==undefined&&oldToolsHash&&extendsToolCatalog(row.toolCatalog,requestedToolCatalog)&&row.signature===signatureFor(actual,oldToolsHash);
-      const matches = (signatureFor ? actual !== undefined && row.signature === signatureFor(actual) : row.signature === signature)||catalogExpanded;
+      const effortChanged=signatureFor&&actual!==undefined&&row.effort!==undefined&&requestedEffort!==undefined&&row.effort!==requestedEffort
+        &&(row.signature===signatureFor(actual,undefined,row.effort)||oldToolsHash&&extendsToolCatalog(row.toolCatalog,requestedToolCatalog)&&row.signature===signatureFor(actual,oldToolsHash,row.effort));
+      const matches = (signatureFor ? actual !== undefined && row.signature === signatureFor(actual) : row.signature === signature)||catalogExpanded||effortChanged;
       if (!matches) {
         // 旧索引若缺少预算，不能猜测后封存；保留检查点供原参数请求恢复。
         if (signatureFor && actual === undefined && (affinityHash || continuationDelta({...row,pendingIds:new Set()},request,{allowInstructionUpdates,hashKey:this.key})))
@@ -223,7 +226,7 @@ export class NativeSessionStore {
       if (snapshot.size !== row.snapshot.size || snapshot.mtimeMs !== row.snapshot.mtimeMs) return this.rejectRestore(row,request,{unsafe:true},'NATIVE_TRANSCRIPT_UNCERTAIN');
       // 池分配时只读核验，容量与进程准备成功后由执行入口消费；直接调用仍默认消费。
       if(consume)await this.forget(row.id);
-      return { id: row.id, delta, ...(catalogExpanded?{toolCatalogExpanded:true}:{}), ...(signatureFor ? {outputTokens:actual} : {}) };
+      return { id: row.id, delta, ...(catalogExpanded?{toolCatalogExpanded:true}:{}),...(effortChanged?{effortChanged:true}:{}), ...(signatureFor ? {outputTokens:actual} : {}) };
     }
     if(affinityHash) {
       try {await fs.access(path.join(this.folder,'binding-'+affinityHash)); return {unsafe:true};}

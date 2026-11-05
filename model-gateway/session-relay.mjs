@@ -83,10 +83,10 @@ export function sessionRelay(options, retained) {
         }finally{await probe.close('client_probe',{discardFrozen:true,immediateKill:true});}
       }
       const matchKey = store?.key || key;
-      const signatureFor = (outputTokens,toolsHash=compiled.metrics.toolsHash) => createHmac('sha256', matchKey).update(stableJson({ model, outputTokens,
+      const signatureFor = (outputTokens,toolsHash=compiled.metrics.toolsHash,effort=request.reasoning_effort||'auto') => createHmac('sha256', matchKey).update(stableJson({ model, outputTokens,
         // 候选仅允许追加指令；旧前缀须逐字节匹配，旧规则修改仍不能复用。
         system: options.liveInstructionUpdates === true ? null : compiled.metrics.systemHash,
-        tools: toolsHash, policy: compiled.policy, effort: request.reasoning_effort || 'auto', stop: request.stop,
+        tools: toolsHash, policy: compiled.policy, effort, stop: request.stop,
         cliVersion: store ? options.cliVersion || null : null })).digest('hex');
       // 保持旧签名算法，用候选 CLI 的实际预算验证身份，再单独检查本轮上限。
       const signature = signatureFor(outputTokens);
@@ -341,6 +341,25 @@ export function sessionRelay(options, retained) {
       for (const [id, until] of failedRestores) if (until <= Date.now()) failedRestores.delete(id);
       if (failedRestores.has(restoreKey)) throw Object.assign(new Error('同一恢复请求刚刚失败；不自动重复提交长历史'),
         { code: 'RESTORE_RETRY_BLOCKED', status: 409, retryable: false });
+      // CLI 无运行中 effort 控制：只在完整空闲边界保存原生检查点，再以原 UUID 切档。
+      if(store){await allocate(async()=>{
+        const candidates=[...sessions].filter(s=>s.affinityHash===affinityHash&&s.nativeConfirmed===true&&s.state==='idle'&&!s.creationReserved&&!s.turn&&!s.pendingIds.size&&!s.pendingHttp.size&&!s.results.size&&!s.pendingControls.size&&!s.interrupted
+          &&(s.request.reasoning_effort||'auto')!==(request.reasoning_effort||'auto')
+          &&s.signature===signatureFor(sessionOutputTokens(s),compiled.metrics.toolsHash,s.request.reasoning_effort||'auto')
+          &&(compactedDelta(s,request,{hashKey:store.key,allowInstructionUpdates:options.liveInstructionUpdates===true})||continuationDelta(s,request,{hashKey:store.key,allowInstructionUpdates:options.liveInstructionUpdates===true})));
+        if(candidates.length>1)throw recoveryError('RECOVERY_SESSION_AMBIGUOUS','推理档位切换不能唯一关联原会话');
+        const s=candidates[0];if(!s)return;const expected=s.expected,history=s.history;s.creationReserved=true;
+        try{
+        if(await store.checkpoint(s)!==true)throw recoveryError('EFFORT_CHECKPOINT_UNAVAILABLE','原生切档检查点未保存；保留原进程');
+        if(s.state!=='idle'||s.turn||s.expected!==expected||s.history!==history){
+          const saved=store.records.get(s.nativeSessionId);if(saved?.expected===expected&&saved.history.length===history.length&&saved.history.every((h,i)=>h===history[i]))await store.forget(s.nativeSessionId);
+          throw recoveryError('SESSION_BUSY','原会话边界已变化；未切换推理档位');
+        }
+        await s.close('effort_changed');if(s.processAlive())throw recoveryError('EFFORT_PROCESS_STILL_RUNNING','旧推理进程尚未退出；未启动第二进程');
+        sessions.delete(s);
+        try{options.onSessionEvent?.({type:'native_effort_switch',event:'checkpoint_saved',nativeSessionId:s.nativeSessionId,from:s.request.reasoning_effort||'auto',to:request.reasoning_effort||'auto',model_requests:0});}catch{}
+        }finally{s.creationReserved=false;}
+      });}
       let selected, delta, toolsUpdate, signatureMatches = 0, historyRejected = 0;
       const rejectionReasons = {};
       const rejectedBoundarySessions=new Set(), mismatchedSessions=new Set();
@@ -398,7 +417,7 @@ export function sessionRelay(options, retained) {
             { code: 'TOOL_CONTINUATION_UNCERTAIN', status: 409, retryable: false });
         }
         selected = await allocate(async () => {
-        const restored = await store?.take(request, signature, options.liveInstructionUpdates === true, affinityHash, {consume:false, signatureFor, requestedOutputTokens:outputTokens,keepNativeOutputBudget:options.keepNativeOutputBudget===true,requestedToolCatalog:toolCatalog(compiled.available)});
+        const restored = await store?.take(request, signature, options.liveInstructionUpdates === true, affinityHash, {consume:false, signatureFor, requestedOutputTokens:outputTokens,keepNativeOutputBudget:options.keepNativeOutputBudget===true,requestedToolCatalog:toolCatalog(compiled.available),requestedEffort:request.reasoning_effort||'auto'});
         if(restored?.id&&[...sessions].some(s=>s.nativeSessionId===restored.id&&s.state!=='closed'))throw recoveryError('NATIVE_SESSION_ALREADY_LIVE','原生会话仍有存活进程；禁止从检查点重复启动');
         if (restored?.mismatch) throw Object.assign(new Error('固定会话的持久检查点不匹配'), {code:'SESSION_HISTORY_MISMATCH',status:409,retryable:false});
         if (restored?.missing) throw Object.assign(new Error('已绑定的原生历史文件缺失；禁止自动重建长历史'), {code:'NATIVE_TRANSCRIPT_MISSING',status:409,retryable:false});
@@ -421,7 +440,7 @@ export function sessionRelay(options, retained) {
           if(restored?.id)await store.forget(restored.id);
         } catch (error) { await created.close(); sessions.delete(created); throw error; }
         try { options.onSessionEvent?.({ type: 'session_restore', requestId: timing?.requestId,
-          tool_catalog_expanded:restored?.toolCatalogExpanded===true,
+          effort_changed:restored?.effortChanged===true,tool_catalog_expanded:restored?.toolCatalogExpanded===true,
           reason: restored?.id ? 'cli_process_closed' : restored?.missing ? 'native_transcript_missing' : 'no_safe_native_checkpoint',
           strategy: created.entryMode || 'native_new', restore_attempts: created.entryMode === 'native_new' ? 0 : 1,
           history_bytes: compiled.metrics.historyBytes, history_tokens: null }); } catch {}
