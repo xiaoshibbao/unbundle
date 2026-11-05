@@ -6,7 +6,7 @@ import {sessionOutputTokens,assertOutputBudget,withoutOutputBudget} from './sess
 import {automaticRecoveryRequest,automaticRecoveryIdentity} from './automatic-recovery.mjs';
 import {quotaRecoveryDelta} from './quota-recovery.mjs';
 import {unrequestedRecoveryDelta,unrequestedToolRecoveryDelta,cancelledWaitContext,cancelledGenerationDelta} from './unrequested-recovery.mjs';
-import {compactedToolDefinitionsChanged} from './tool-definition-update.mjs';
+import {compactedToolDefinitionsChanged,toolCatalog} from './tool-definition-update.mjs';
 import {settleFrozenTools,recoveryInputMessages} from './native-recovery.mjs';
 import {SessionLifecycle} from './session-lifecycle.mjs';
 import {compactionIntent,compactionBoundary,compactionRecord,compactedDelta} from './compaction-boundary.mjs';
@@ -398,7 +398,7 @@ export function sessionRelay(options, retained) {
             { code: 'TOOL_CONTINUATION_UNCERTAIN', status: 409, retryable: false });
         }
         selected = await allocate(async () => {
-        const restored = await store?.take(request, signature, options.liveInstructionUpdates === true, affinityHash, {consume:false, signatureFor, requestedOutputTokens:outputTokens,keepNativeOutputBudget:options.keepNativeOutputBudget===true});
+        const restored = await store?.take(request, signature, options.liveInstructionUpdates === true, affinityHash, {consume:false, signatureFor, requestedOutputTokens:outputTokens,keepNativeOutputBudget:options.keepNativeOutputBudget===true,requestedToolCatalog:toolCatalog(compiled.available)});
         if(restored?.id&&[...sessions].some(s=>s.nativeSessionId===restored.id&&s.state!=='closed'))throw recoveryError('NATIVE_SESSION_ALREADY_LIVE','原生会话仍有存活进程；禁止从检查点重复启动');
         if (restored?.mismatch) throw Object.assign(new Error('固定会话的持久检查点不匹配'), {code:'SESSION_HISTORY_MISMATCH',status:409,retryable:false});
         if (restored?.missing) throw Object.assign(new Error('已绑定的原生历史文件缺失；禁止自动重建长历史'), {code:'NATIVE_TRANSCRIPT_MISSING',status:409,retryable:false});
@@ -421,6 +421,7 @@ export function sessionRelay(options, retained) {
           if(restored?.id)await store.forget(restored.id);
         } catch (error) { await created.close(); sessions.delete(created); throw error; }
         try { options.onSessionEvent?.({ type: 'session_restore', requestId: timing?.requestId,
+          tool_catalog_expanded:restored?.toolCatalogExpanded===true,
           reason: restored?.id ? 'cli_process_closed' : restored?.missing ? 'native_transcript_missing' : 'no_safe_native_checkpoint',
           strategy: created.entryMode || 'native_new', restore_attempts: created.entryMode === 'native_new' ? 0 : 1,
           history_bytes: compiled.metrics.historyBytes, history_tokens: null }); } catch {}

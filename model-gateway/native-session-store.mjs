@@ -1,3 +1,4 @@
+import {toolCatalog,validToolCatalog,extendsToolCatalog} from './tool-definition-update.mjs';
 import {sessionOutputTokens,assertOutputBudget,outputBudgetError} from './session-budget.mjs';
 import {compactedDelta,compactionIntent} from './compaction-boundary.mjs';
 import {hydrateCompactionSource} from './native-compaction.mjs';
@@ -36,6 +37,8 @@ export class NativeSessionStore {
         && (row.interrupted===true?row.expected===undefined&&validCancellationBoundary(row.cancellation,row.history?.length):hash.test(row.expected))
         && Array.isArray(row.history) && row.history.every(value => hash.test(value))
         && (row.completedRecap===undefined||row.completedRecap===true)
+        && (row.toolSchemaHash===undefined||hash.test(row.toolSchemaHash))
+        && (row.toolCatalog===undefined||validToolCatalog(row.toolCatalog))
         && (row.verifiedToolResults===undefined || Array.isArray(row.verifiedToolResults)&&row.verifiedToolResults.length>0&&row.verifiedToolResults.length<=32
           &&row.verifiedToolResults.every(v=>v&&typeof v.id==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(v.id)&&hash.test(v.hash))
           &&new Set(row.verifiedToolResults.map(v=>v.id)).size===row.verifiedToolResults.length)
@@ -111,6 +114,7 @@ export class NativeSessionStore {
       memoryAliases:compactMemoryAliases(messages,{hashKey:this.key,toolSchemas:session.request.tools}).map(({index,hash})=>({index,hash})),
       conversation:[...sessionHistory(messages).filter(m=>!['system','developer'].includes(m.role)),session.lastAssistant].map(m=>historyKey(m,{hashKey:this.key,toolSchemas:session.request.tools}))}:undefined;
     this.records.set(session.nativeSessionId, { id: session.nativeSessionId, signature: session.signature,outputTokens:sessionOutputTokens(session),compactSource,
+      toolSchemaHash:session.compiled?.metrics?.toolsHash,toolCatalog:session.compiled?.available?toolCatalog(session.compiled.available):undefined,
       historyNormalization: session.historyNormalization, affinityHash: session.affinityHash, history: [...session.history], expected: session.expected, compaction:session.compaction, snapshot, savedAt: Date.now(),
       ...(cancellation?{interrupted:true,cancellation}:{}),
       ...(completedRecapBoundary(session,{hashKey:this.key,toolSchemas:session.request.tools})?{completedRecap:true}:{}) });
@@ -183,12 +187,14 @@ export class NativeSessionStore {
     }catch { /* 已封存索引；磁盘错误不允许恢复推理。 */ }
     return result;
   }
-  async take(request, signature, allowInstructionUpdates, affinityHash, {consume=true,signatureFor,requestedOutputTokens,keepNativeOutputBudget=false}={}) {
+  async take(request, signature, allowInstructionUpdates, affinityHash, {consume=true,signatureFor,requestedOutputTokens,keepNativeOutputBudget=false,requestedToolCatalog}={}) {
     await this.ready;
     for (const row of this.records.values()) {
       if (row.affinityHash !== affinityHash) continue;
       const actual = sessionOutputTokens(row) ?? (row.signature === signature ? requestedOutputTokens : undefined);
-      const matches = signatureFor ? actual !== undefined && row.signature === signatureFor(actual) : row.signature === signature;
+      const oldToolsHash=row.toolSchemaHash||row.compactSource?.toolsHash;
+      const catalogExpanded=signatureFor&&actual!==undefined&&oldToolsHash&&extendsToolCatalog(row.toolCatalog,requestedToolCatalog)&&row.signature===signatureFor(actual,oldToolsHash);
+      const matches = (signatureFor ? actual !== undefined && row.signature === signatureFor(actual) : row.signature === signature)||catalogExpanded;
       if (!matches) {
         // 旧索引若缺少预算，不能猜测后封存；保留检查点供原参数请求恢复。
         if (signatureFor && actual === undefined && (affinityHash || continuationDelta({...row,pendingIds:new Set()},request,{allowInstructionUpdates,hashKey:this.key})))
@@ -217,7 +223,7 @@ export class NativeSessionStore {
       if (snapshot.size !== row.snapshot.size || snapshot.mtimeMs !== row.snapshot.mtimeMs) return this.rejectRestore(row,request,{unsafe:true},'NATIVE_TRANSCRIPT_UNCERTAIN');
       // 池分配时只读核验，容量与进程准备成功后由执行入口消费；直接调用仍默认消费。
       if(consume)await this.forget(row.id);
-      return { id: row.id, delta, ...(signatureFor ? {outputTokens:actual} : {}) };
+      return { id: row.id, delta, ...(catalogExpanded?{toolCatalogExpanded:true}:{}), ...(signatureFor ? {outputTokens:actual} : {}) };
     }
     if(affinityHash) {
       try {await fs.access(path.join(this.folder,'binding-'+affinityHash)); return {unsafe:true};}
