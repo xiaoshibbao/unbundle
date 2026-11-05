@@ -355,7 +355,7 @@ export function sessionRelay(options, retained) {
         }
         if (affinityHash && !['idle','waiting-tool'].includes(session.state)) throw Object.assign(new Error('固定会话仍在处理上一轮'), {code:'SESSION_BUSY',status:409,retryable:false});
         if (!['idle', 'waiting-tool'].includes(session.state)) continue;
-        const compacted=compactedDelta(session,request,{hashKey:store?.key});
+        const compacted=compactedDelta(session,request,{hashKey:store?.key,allowInstructionUpdates:options.liveInstructionUpdates===true});
         const updatingTools=!!compacted&&compactedToolDefinitionsChanged(session,compiled)
           &&session.signature===signatureFor(session.options.outputTokens,session.compiled.metrics.toolsHash);
         if(!matchesSignature(session)&&!updatingTools)continue;
@@ -435,7 +435,7 @@ export function sessionRelay(options, retained) {
       // 先撤销旧检查点再启动下一轮；崩溃或工具执行中断不能留下可重放的旧边界。
       try {
         await store?.forget(selected.nativeSessionId);
-        if(compactedDelta(selected,request,{hashKey:store?.key}))selected.compaction=undefined;
+        if(compactedDelta(selected,request,{hashKey:store?.key,allowInstructionUpdates:options.liveInstructionUpdates===true}))selected.compaction=undefined;
         const running = selected.run(request, delta, { signal, onText, timing, toolsUpdate });
         selected.creationReserved = false;
         const result = await running;

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { sessionRelay } from './session-relay.mjs';
+import {compactionRecord,SUMMARY_HEADER} from './compaction-boundary.mjs';
 import { assistantMessage, continuationDelta, historyKey } from './session-history.mjs';
 
 // 只模拟控制协议和普通文本回复；不调用模型，不执行工具。
@@ -31,11 +32,11 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
 });`;
 const base = { model:'claude-opus-5-5', max_tokens:1024, messages:[{role:'system',content:'初始规则'}, {role:'user',content:'开始'}] };
 async function setup({ mode, ...options } = {}) {
- const home=await fs.mkdtemp(path.join(os.tmpdir(),'live-instructions-'));let spawns=0;
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'live-instructions-'));let spawns=0;const sessions=new Set();
  const relay=sessionRelay({home,cli:'synthetic',model:base.model,modelFor:model=>model,maxOutputTokens:1024,timeoutMs:3000,
   instructionUpdateTimeoutMs:100, ...options,
-  spawnProcess:(_cli,_args,config)=>{spawns++;return spawn(process.execPath,['--input-type=module','-e',fake],{...config,env:{...config.env,OFFLINE_CONTROL_CASE:mode||'success'}});}});
- return {relay,spawns:()=>spawns,async close(){await relay.close({discardFrozen:true});await fs.rm(home,{recursive:true,force:true});}};
+  spawnProcess:(_cli,_args,config)=>{spawns++;return spawn(process.execPath,['--input-type=module','-e',fake],{...config,env:{...config.env,OFFLINE_CONTROL_CASE:mode||'success'}});}}, {sessions});
+ return {relay,sessions,spawns:()=>spawns,async close(){await relay.close({discardFrozen:true});await fs.rm(home,{recursive:true,force:true});}};
 }
 
 test('显式候选保留真实动态指令角色和位置，多个更新在同一CLI内累计',async()=>{
@@ -125,4 +126,17 @@ test('工具交接候选允许追加真实指令，仍拒绝缺失结果、分�
  for(const delta of [[update],[result,update,{role:'user',content:'插入新任务'}]])
   assert.equal(continuationDelta(session,{messages:[...base.messages,reply,...delta]},{allowInstructionUpdates:true}),undefined);
  assert.equal(continuationDelta(session,{messages:[{...base.messages[0],content:'初始规则 '},base.messages[1],reply,result,update]},{allowInstructionUpdates:true}),undefined);
+});
+
+for(const mode of ['success','reject','timeout'])test('原生压缩后真实首段系统更新先经控制确认再提交用户消息 mode='+mode,async()=>{
+ const state=await setup({mode,liveInstructionUpdates:true,instructionUpdateTimeoutMs:mode==='timeout'?100:1000});
+ try{
+  const first=await state.relay.infer(base),session=[...state.sessions][0],pid=session.child.pid;
+  session.nativeCompactionCommit={boundaryUuid:'offline-boundary'};
+  session.compaction=compactionRecord(session,{messages:[...base.messages,assistantMessage(first),{role:'user',content:'summary'}]},{content:'<summary>COMPACTED</summary>'});session.compaction.sourceAssistantHash=historyKey(assistantMessage(first));
+  const updated={role:'system',content:'ACTUAL_NEW_SDK_SYSTEM_RULES'},request={...base,messages:[updated,{role:'user',content:SUMMARY_HEADER+'\n\nSummary:\nCOMPACTED'},{role:'user',content:'continue'}]};
+  if(mode==='success'){
+   const answer=await state.relay.infer(request);assert.deepEqual(JSON.parse(answer.content),{controls:1,updates:[{messageIndex:0,...updated}]});assert.equal(session.child.pid,pid);assert.equal(state.spawns(),1);
+  }else await assert.rejects(state.relay.infer(request),{code:mode==='reject'?'CLI_INSTRUCTION_UPDATE_FAILED':'CLI_INSTRUCTION_UPDATE_TIMEOUT'});
+ }finally{await state.close();}
 });

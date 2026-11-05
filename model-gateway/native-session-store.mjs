@@ -203,7 +203,7 @@ export class NativeSessionStore {
       }
       if(row.compaction?.nativeCommitted)await hydrateCompactionSource({nativeSessionId:row.id,compaction:row.compaction,options:{home:this.home,configDir:this.configDir,historyHashKey:this.key}});
       let delta = row.interrupted?cancelledCheckpointDelta(row,request,{hashKey:this.key,allowInstructionUpdates}):
-        compactedDelta({...row,pendingIds:new Set()},request,{hashKey:this.key}) || continuationDelta({ ...row,
+        compactedDelta({...row,pendingIds:new Set()},request,{hashKey:this.key,allowInstructionUpdates}) || continuationDelta({ ...row,
           ...(row.verifiedToolResults?{options:{allowToolHandoffUserMessages:true}}:{}),
           pendingIds: new Set(row.verifiedToolResults?.map(v=>v.id)||[]) }, request,
         { allowInstructionUpdates, hashKey: this.key });

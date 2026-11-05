@@ -104,12 +104,15 @@ export function compactionRecord(session,request,result,{hashKey,sourceAssistant
   source,...(sourceAssistantHash?{sourceAssistantHash}:{}),
   systems:leading(session.request.messages).map(m=>historyKey(m,{hashKey,exact:true}))};
 }
-export function compactedDelta(session,request,{hashKey}={}) {
+export function compactedDelta(session,request,{hashKey,allowInstructionUpdates=false}={}) {
  const record=session.compaction;
  if(!record||record.version!==1||!Number.isSafeInteger(record.summaryLength)||record.summaryLength<1
   ||!Array.isArray(record.source)||!Array.isArray(record.systems)||session.pendingIds?.size)return;
  const systems=leading(request.messages);
- if(systems.length!==record.systems.length||!systems.every((m,i)=>historyKey(m,{hashKey,exact:true})===record.systems[i]))return;
+ if(systems.length!==record.systems.length)return;
+ const changedSystems=systems.filter((m,i)=>historyKey(m,{hashKey,exact:true})!==record.systems[i]);
+ // 原生摘要与保留消息全部核验后，真实新指令经既有 MCP 控制通道确认；不开启候选仍严格拒绝。
+ if(changedSystems.length&&!(allowInstructionUpdates&&record.nativeCommitted))return;
  const messages=conversation(request.messages),wrapper=messages[0],split=splitCompactMemory(text(wrapper),SUMMARY_HEADER),content=split?.summary;
  if(wrapper?.role!=='user'||!content?.startsWith(SUMMARY_HEADER+'\n\n'))return;
  let start=SUMMARY_HEADER.length+2;
@@ -138,6 +141,6 @@ export function compactedDelta(session,request,{hashKey}={}) {
  const suffix=content.slice(start+record.summaryLength).trim();
  const head=record.nativeCommitted?(suffix?[{role:'user',content:'Caller continuation metadata after compaction:\n'+suffix}]:[]):[wrapper];
  const memory=split.memory?[{role:'user',content:'Caller auto-memory snapshot supplied with the compacted conversation (caller context):\n'+split.memory}]:[];
- const delta=[...memory,...head,...retainedMemory,...fresh,...request.messages.filter(m=>['system','developer'].includes(m.role)&&!systems.includes(m))];
+ const delta=[...changedSystems,...memory,...head,...retainedMemory,...fresh,...request.messages.filter(m=>['system','developer'].includes(m.role)&&!systems.includes(m))];
  return delta.length?delta:record.nativeCommitted?[{role:'user',content:'Continue the current task from the preserved native context.'}]:[wrapper];
 }

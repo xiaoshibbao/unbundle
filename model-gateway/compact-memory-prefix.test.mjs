@@ -26,3 +26,13 @@ test('保留窗口中的完成工具批次允许已观察的 trim 与自动记�
  }
  const bad=structuredClone(incoming);bad.messages[2].tool_calls[0].function.arguments='{"command":"changed"}';assert.equal(compactedDelta(session,bad),undefined);
 });
+
+test('原生压缩后刷新 SDK 系统指令只在动态通道开启且摘要/保留历史全部核验时续接',()=>{
+ const session=setup(),incoming=request(),updated={role:'system',content:'NEW_REAL_CALLER_SDK_INSTRUCTIONS'};incoming.messages[0]=updated;
+ assert.equal(compactedDelta(session,incoming),undefined);
+ const delta=compactedDelta(session,incoming,{allowInstructionUpdates:true});assert(delta);assert.equal(delta[0],updated);assert.equal(delta.at(-1).content,'continue');
+ const forged=structuredClone(incoming);forged.messages[1].content=forged.messages[1].content.replace('VERIFIED_SUMMARY','FORGED');assert.equal(compactedDelta(session,forged,{allowInstructionUpdates:true}),undefined);
+ const branch=structuredClone(incoming);branch.messages[2].content='different retained reply';assert.equal(compactedDelta(session,branch,{allowInstructionUpdates:true}),undefined);
+ const more={...incoming,messages:[updated,updated,...incoming.messages.slice(1)]};assert.equal(compactedDelta(session,more,{allowInstructionUpdates:true}),undefined);
+ session.compaction.nativeCommitted=false;assert.equal(compactedDelta(session,incoming,{allowInstructionUpdates:true}),undefined);
+});
