@@ -2,10 +2,11 @@ import { terminalNotice } from './empty-output-guard.mjs';
 
 // 仅从 CLI 的失败结果识别账户会话额度；正文引用和普通 429/网络错误不进入此分支。
 export function sessionQuotaFailure(message, statistics = {}, now = Date.now()) {
-  if (typeof message !== 'string' || !/^You've hit your (?:session|5-hour) limit\b/.test(message)) return undefined;
+  if (typeof message !== 'string' || !/^You've hit your (?:session|5-hour|weekly) limit\b/.test(message)) return undefined;
+  const weekly=/^You've hit your weekly limit\b/.test(message);
   const reset = message.match(/\bresets\s+(\d{1,2}):(\d{2})(am|pm)\s+\((UTC|[A-Za-z_]+\/[A-Za-z_]+(?:\/[A-Za-z_]+)?)\)/i);
   let expiresAt = now + 60000, resetLabel;
-  if (reset) {
+  if (reset && !weekly) {
     const [, hour, minute, period, zone] = reset;
     if (+hour >= 1 && +hour <= 12 && +minute < 60) {
       try {
@@ -20,10 +21,10 @@ export function sessionQuotaFailure(message, statistics = {}, now = Date.now()) 
       } catch { /* 未知时区只短暂冷却，不猜测重置日期。 */ }
     }
   }
-  const content = '[claude-code-relay:SESSION_LIMIT] 云端账户的会话额度已耗尽，网关已停止本轮及自动重试。'
+  const content = '[claude-code-relay:SESSION_LIMIT] 云端账户的'+(weekly?'每周':'会话')+'额度已耗尽，网关已停止本轮及自动重试。'
     + (resetLabel ? `上游提示重置时间：${resetLabel}。重置后请手动再试。`
       : '上游未提供可确认的重置时间，网关暂时拦截新请求一分钟；请等待额度恢复后手动再试。');
-  return Object.assign(new Error(content), { code: 'SESSION_LIMIT', expiresAt, statistics });
+  return Object.assign(new Error(content), { code: 'SESSION_LIMIT', quotaScope:weekly?'weekly':'session', expiresAt, statistics });
 }
 
 // 同一网关只使用一个订阅账户；冷却在认证和 CLI 启动前检查，且只保存合成提示与期限。

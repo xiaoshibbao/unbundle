@@ -97,7 +97,7 @@ test('重置时间按上游 IANA 时区计算，过期释放；缺失或无效�
     now += 60000; assert.equal(guard.check(), undefined);
   }
   assert.equal(guard.record(new Error('网络断开')), undefined);
-  for (const text of ['429 rate limit', 'Connection reset', '输出 token 上限无效', `模型引用：${message}`, "You've hit your weekly limit"]) {
+  for (const text of ['429 rate limit', 'Connection reset', '输出 token 上限无效', `模型引用：${message}`]) {
     assert.equal(sessionQuotaFailure(text), undefined);
   }
 });
@@ -124,4 +124,10 @@ test('新版 CLI 的 5-hour limit 与 UTC 重置时间正确归类',()=>{
  for(const text of ["You've hit your 5-hour limit", "You've hit your session limit"])assert.equal(sessionQuotaFailure(text).code,'SESSION_LIMIT');
  assert.equal(sessionQuotaFailure("The tool printed: You've hit your 5-hour limit"),undefined);
  assert.equal(sessionQuotaFailure("You've hit your 5-hour limitlessness"),undefined);
+});
+
+test('每周额度错误识别为限额，但不凭只有时刻的提示猜测每周重置日期',()=>{
+ const now=Date.parse('2026-11-05T19:00:00Z'),error=sessionQuotaFailure("You've hit your weekly limit · resets 4am (UTC)",{},now);
+ assert.equal(error.code,'SESSION_LIMIT');assert.equal(error.quotaScope,'weekly');assert.equal(error.expiresAt,now+60000);assert(error.message.includes('每周'));assert(error.message.includes('未提供可确认的重置时间'));
+ assert.equal(sessionQuotaFailure("The model quoted: You've hit your weekly limit"),undefined);
 });

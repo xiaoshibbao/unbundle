@@ -1,3 +1,4 @@
+import {sessionQuotaFailure} from './session-quota-guard.mjs';
 import fs from 'node:fs/promises';
 import {constants} from 'node:fs';
 import path from 'node:path';
@@ -84,10 +85,17 @@ function retainedText(boundary){
  return lines.length?'\n\nRecent verified context retained by the native CLI:\n'+lines.join('\n\n'):'';
 }
 
+// CLI 本地 /compact 可用成功命令封装报告 API 限额；只检查明确的本地命令错误。
+export function compactQuotaFailure(result){
+ if(result?.is_error)return sessionQuotaFailure(result.result);
+ if(result?.local_command!=='compact'||typeof result.result!=='string'||!result.result.startsWith('Error during compaction: '))return;
+ return sessionQuotaFailure(result.result.slice('Error during compaction: '.length));
+}
 // 唯一摘要由 CLI 内置 /compact 生成；确认原生边界和落盘摘要后才返回 Desktop。
 export async function nativeCompact(session,request,boundary,{signal,timing}={}){
  if(session.options.persistentSessions!==true)throw failure('NATIVE_COMPACT_REQUIRES_PERSISTENCE','原生压缩需要持久化 session',422);
  if(session.state==='frozen'||session.turn)throw failure('NATIVE_COMPACT_BOUNDARY_UNSAFE','当前会话不能安全执行原生压缩',409);
+ const initialState=session.state;let bufferedCount=0;
  const base=session.request,originalLine=session.line,descriptor=Object.getOwnPropertyDescriptor(session,'line');
  const audit=cliOutputAudit({requestId:timing?.requestId,sink:session.options.onCliAudit});
  const probes=requestProbes({requestId:timing?.requestId,anomalyDir:session.options.anomalyDir,log:session.options.onAnomaly,
@@ -101,7 +109,7 @@ export async function nativeCompact(session,request,boundary,{signal,timing}={})
  const onBytes=chunk=>{bytes+=chunk.length;audit.stdout(chunk);if(session.options.maxCliOutputBytes>0&&bytes>session.options.maxCliOutputBytes)rejectRun(failure('CLI_OUTPUT_LIMIT','原生压缩输出超过上限'));};
  const onClose=()=>rejectRun(failure('CLI_SESSION_EXITED','原生压缩进程意外退出'));
  const sendFrame=frame=>session.child.stdin.write(JSON.stringify({...frame,uuid:frame.uuid||randomUUID()})+'\n');
- const sendBuffered=frame=>{const uuid=randomUUID();bufferedIds.add(uuid);sendFrame({...frame,uuid});};
+ const sendBuffered=frame=>{bufferedCount++;const uuid=randomUUID();bufferedIds.add(uuid);sendFrame({...frame,uuid});};
  clearTimeout(session.expiry);session.state='compacting';
  session.compactionAbort=error=>rejectRun(error);
  session.line=function(value){
@@ -157,6 +165,7 @@ export async function nativeCompact(session,request,boundary,{signal,timing}={})
   const before=structuredClone(session.modelUsageTotals);
   phase='command';const done=nextTerminal();sendFrame({type:'user',message:{role:'user',content:'/compact'}});
   const result=await wait(done);
+  const quota=!compactBoundary&&compactQuotaFailure(result);if(quota)throw quota;
   if(!compactBoundary)throw result.is_error?cliFailure(result):failure('NATIVE_COMPACT_NOT_COMMITTED','CLI 未提交原生压缩边界；未把普通文本当作摘要');
   if(result.is_error)throw cliFailure(result);
   const saved=await wait(readNativeCompactSummary(session,compactBoundary));
@@ -176,7 +185,13 @@ export async function nativeCompact(session,request,boundary,{signal,timing}={})
   return answer;
  }catch(error){
   probeOutcome=signal?.aborted?'cancelled':error.code==='NATIVE_COMPACT_TIMEOUT'?'timeout':'error';
-  await session.freeze(error.code||'NATIVE_COMPACT_FAILED',{request});throw error;
+  if(error.code==='SESSION_LIMIT'&&phase==='command'&&!compactBoundary&&initialState==='idle'&&!bufferedCount
+    &&!session.pendingIds.size&&!session.pendingHttp.size&&!session.results.size&&!session.pendingControls.size&&!session.lastAssistant?.tool_calls?.length){
+   session.state='idle';session.lastUsed=Date.now();
+   session.expiry=setTimeout(()=>{void session.close('expired').catch(()=>{});},session.options.sessionTtlMs||1800000);session.expiry.unref?.();
+   session.report('compact_quota_rejected','native_context_preserved');
+  }else await session.freeze(error.code||'NATIVE_COMPACT_FAILED',{request});
+  throw error;
  }finally{
   clearTimeout(timer);signal?.removeEventListener('abort',abort);session.child.stdout.off('data',onBytes);session.child.off('close',onClose);
   if(descriptor)Object.defineProperty(session,'line',descriptor);else delete session.line;

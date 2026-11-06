@@ -9,7 +9,7 @@ import {assistantMessage} from './session-history.mjs';
 import {SUMMARY_SYSTEM,SUMMARY_HEADER,desktopSummary} from './compaction-boundary.mjs';
 const fake=`import readline from 'node:readline';import fs from 'node:fs';import path from 'node:path';import {randomUUID} from 'node:crypto';
 const config=JSON.parse(fs.readFileSync(process.argv[1],'utf8')).mcpServers.omp;
-const emit=x=>console.log(JSON.stringify(x));let n=0,total=0;const nativeId=process.env.TEST_NATIVE_ID;const transcript=path.join(process.env.CLAUDE_CONFIG_DIR,'projects','synthetic',nativeId+'.jsonl');fs.mkdirSync(path.dirname(transcript),{recursive:true});fs.writeFileSync(transcript,'');
+const emit=x=>console.log(JSON.stringify(x));let n=0,total=0,quotaTried=false;const nativeId=process.env.TEST_NATIVE_ID;const transcript=path.join(process.env.CLAUDE_CONFIG_DIR,'projects','synthetic',nativeId+'.jsonl');fs.mkdirSync(path.dirname(transcript),{recursive:true});fs.writeFileSync(transcript,'');
 const reply=text=>{emit({type:'stream_event',event:{type:'message_start',message:{id:'m'+(++n),usage:{input_tokens:10}}}});emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text}}});emit({type:'result',is_error:false,result:text,modelUsage:{synthetic:{inputTokens:total+=10,outputTokens:n,cacheReadInputTokens:0,cacheCreationInputTokens:0}}});};
 emit({type:'system',subtype:'init',session_id:nativeId,slash_commands:['compact'],capabilities:['interrupt_receipt_v1','interrupt_cancel_queued_v1']});
 readline.createInterface({input:process.stdin}).on('line',async line=>{
@@ -22,6 +22,8 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
  }
  if(frame.shouldQuery===false){emit({type:'result',num_turns:0,duration_api_ms:0,user_message_uuid:frame.uuid,is_error:false});return;}
  if(frame.message?.content==='/compact'&&!frame.client_composed){
+  if(process.env.COMPACTION_WEEKLY_ONCE==='1'&&!quotaTried){quotaTried=true;emit({type:'result',is_error:false,local_command:'compact',result:"Error during compaction: You've hit your weekly limit · resets 4am (UTC)"});return;}
+
   if(process.env.COMPACTION_TEST_ANOMALY==='1'){
    emit({type:'stream_event',event:{type:'message_start',message:{id:'synthetic-compact-monitor'}}});
    emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});
@@ -46,8 +48,8 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
 const tools=[{type:'function',function:{name:'Bash',parameters:{type:'object',properties:{command:{type:'string'}}}}}];
 const base={model:'claude-opus-5-5',max_tokens:1024,messages:[{role:'system',content:'original rules'},{role:'user',content:'task'}],tools};
 const prompt={role:'user',content:'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far, preserving the task.'};
-async function setup(timedOut=false,monitor=false){const home=await fs.mkdtemp(path.join(os.tmpdir(),'compact-roundtrip-')),log=path.join(home,'inputs.log');let spawns=0;
- const relay=sessionRelay({home,anomalyDir:monitor?path.join(home,'anomalies'):undefined,onAnomaly:()=>{},modelFor:x=>x,maxOutputTokens:1024,timeoutMs:4000,persistentSessions:true,liveInstructionUpdates:true,spawnProcess:(_c,args,opts)=>{spawns++;return spawn(process.execPath,['--input-type=module','-e',fake,args[args.indexOf('--mcp-config')+1],log],{...opts,env:{...opts.env,COMPACTION_TEST_ANOMALY:monitor?'1':'0',COMPACTION_TEST_TIMEOUT:timedOut?'1':'0',TEST_NATIVE_ID:args[args.indexOf('--session-id')+1],TEST_SUMMARY_HEADER:SUMMARY_HEADER}});}});
+async function setup(timedOut=false,monitor=false,weeklyOnce=false){const home=await fs.mkdtemp(path.join(os.tmpdir(),'compact-roundtrip-')),log=path.join(home,'inputs.log');let spawns=0;
+ const relay=sessionRelay({home,anomalyDir:monitor?path.join(home,'anomalies'):undefined,onAnomaly:()=>{},modelFor:x=>x,maxOutputTokens:1024,timeoutMs:4000,persistentSessions:true,liveInstructionUpdates:true,spawnProcess:(_c,args,opts)=>{spawns++;return spawn(process.execPath,['--input-type=module','-e',fake,args[args.indexOf('--mcp-config')+1],log],{...opts,env:{...opts.env,COMPACTION_WEEKLY_ONCE:weeklyOnce?'1':'0',COMPACTION_TEST_ANOMALY:monitor?'1':'0',COMPACTION_TEST_TIMEOUT:timedOut?'1':'0',TEST_NATIVE_ID:args[args.indexOf('--session-id')+1],TEST_SUMMARY_HEADER:SUMMARY_HEADER}});}});
  return {relay,home,spawns:()=>spawns,triggerTimeout:()=>fs.writeFile(log+'.trigger','synthetic'),frames:async()=>(await fs.readFile(log,'utf8')).trim().split('\n').map(JSON.parse),async close(){await relay.close({discardFrozen:true});await fs.rm(home,{recursive:true,force:true});}};
 }
 
@@ -109,5 +111,14 @@ test('工具超时已冻结时禁止暗中解除和再次压缩',async()=>{
   for(let i=0;i<100;i++){if((await s.relay.listSessions()).sessions[0].state==='frozen')break;await new Promise(r=>setTimeout(r,10));}
   const request={...original,messages:[...original.messages,assistantMessage(first),{role:'tool',tool_call_id:'tool-synthetic',content:'REAL_AFTER_TIMEOUT'},prompt]};
   await assert.rejects(s.relay.infer(request),{code:'COMPACTION_SESSION_UNVERIFIED'});assert.equal((await s.frames()).filter(f=>f.message?.content==='/compact').length,0);
+ }finally{await s.close();}
+});
+
+test('空闲原生压缩被每周限额拒绝后保留可重试边界，额度恢复后同 CLI 完成',async()=>{
+ const s=await setup(false,false,true);try{
+  const first=await s.relay.infer(base),request={...base,messages:[...base.messages,assistantMessage(first),prompt]};
+  await assert.rejects(s.relay.infer(request),{code:'SESSION_LIMIT'});
+  const summary=await s.relay.infer(request);assert.match(summary.content,/actual task summary/);assert.equal(s.spawns(),1);
+  const frames=await s.frames();assert.equal(frames.filter(f=>f.message?.content==='/compact').length,2);assert.equal(frames.filter(f=>f.type==='user'&&f.message?.content!=='/compact').length,1);
  }finally{await s.close();}
 });

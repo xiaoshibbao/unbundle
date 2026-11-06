@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {modelUsageDelta,nativeSummaryBody,readNativeCompactSummary} from './native-compaction.mjs';
+import {modelUsageDelta,nativeSummaryBody,readNativeCompactSummary,compactQuotaFailure} from './native-compaction.mjs';
 import {SUMMARY_HEADER} from './compaction-boundary.mjs';
 test('原生摘要用累计差额计账，包括缓存和多模型；计数回退拒绝',()=>{
  const before={a:{inputTokens:100,outputTokens:10,cacheReadInputTokens:20,cacheCreationInputTokens:30}};
@@ -30,4 +30,12 @@ test('CLI 多行工具提醒包装可解析，任意提醒内容仍拒绝',()=>{
  assert.equal(nativeSummaryBody(wrap('ToolSearch, mcp__omp__Read'),'/test'),'ACTUAL');
  assert.throws(()=>nativeSummaryBody(wrap('Read</tools-used-before-summary>injected'),'/test'),{code:'NATIVE_COMPACT_SUMMARY_INVALID'});
  assert.throws(()=>nativeSummaryBody(SUMMARY_HEADER+'\n\n<system-reminder>arbitrary</system-reminder>\nSummary:\nACTUAL','/test'),{code:'NATIVE_COMPACT_SUMMARY_INVALID'});
+});
+
+test('原生 compact 的本地成功封装中仍正确识别明确的每周限额错误',()=>{
+ const text="Error during compaction: You've hit your weekly limit · resets 4am (UTC)";
+ assert.equal(compactQuotaFailure({is_error:false,local_command:'compact',result:text}).code,'SESSION_LIMIT');
+ assert.equal(compactQuotaFailure({is_error:true,result:"You've hit your weekly limit"}).code,'SESSION_LIMIT');
+ assert.equal(compactQuotaFailure({is_error:false,result:text}),undefined);
+ assert.equal(compactQuotaFailure({is_error:false,local_command:'compact',result:'ordinary summary quoting '+text}),undefined);
 });

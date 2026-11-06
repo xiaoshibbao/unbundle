@@ -152,6 +152,7 @@ export function sessionRelay(options, retained) {
           try{options.onSessionEvent?.({type:'native_compaction',sessionId:session.sessionId,requestId:timing?.requestId,event:'summary_complete',code:'native_context_compacted',pre_tokens:session.nativeCompactionCommit.metadata?.pre_tokens,post_tokens:session.nativeCompactionCommit.metadata?.post_tokens});}catch{}
           return result;
         } catch(error){
+          if(error.code==='SESSION_LIMIT'&&session.state==='idle')await store?.checkpoint(session);
           throw error;
         } finally {session.compacting=false;session.creationReserved=false;}
       }
