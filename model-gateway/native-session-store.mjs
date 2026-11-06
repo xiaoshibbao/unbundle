@@ -1,3 +1,4 @@
+import {refusalCheckpointDelta} from './refusal-checkpoint.mjs';
 import {toolCatalog,validToolCatalog,extendsToolCatalog} from './tool-definition-update.mjs';
 import {sessionOutputTokens,assertOutputBudget,outputBudgetError} from './session-budget.mjs';
 import {compactedDelta,compactionIntent} from './compaction-boundary.mjs';
@@ -116,6 +117,7 @@ export class NativeSessionStore {
       conversation:[...sessionHistory(messages).filter(m=>!['system','developer'].includes(m.role)),session.lastAssistant].map(m=>historyKey(m,{hashKey:this.key,toolSchemas:session.request.tools}))}:undefined;
     this.records.set(session.nativeSessionId, { id: session.nativeSessionId, signature: session.signature,outputTokens:sessionOutputTokens(session),compactSource,
       effort:session.request.reasoning_effort||'auto',toolSchemaHash:session.compiled?.metrics?.toolsHash,toolCatalog:session.compiled?.available?toolCatalog(session.compiled.available):undefined,
+      ...(session.lastStopReason==='refusal'?{completedRefusal:true}:{}),
       historyNormalization: session.historyNormalization, affinityHash: session.affinityHash, history: [...session.history], expected: session.expected, compaction:session.compaction, snapshot, savedAt: Date.now(),
       ...(cancellation?{interrupted:true,cancellation}:{}),
       ...(completedRecapBoundary(session,{hashKey:this.key,toolSchemas:session.request.tools})?{completedRecap:true}:{}) });
@@ -206,7 +208,7 @@ export class NativeSessionStore {
       }
       if(row.compaction?.nativeCommitted)await hydrateCompactionSource({nativeSessionId:row.id,compaction:row.compaction,options:{home:this.home,configDir:this.configDir,historyHashKey:this.key}});
       let delta = row.interrupted?cancelledCheckpointDelta(row,request,{hashKey:this.key,allowInstructionUpdates}):
-        compactedDelta({...row,pendingIds:new Set()},request,{hashKey:this.key,allowInstructionUpdates}) || continuationDelta({ ...row,
+        refusalCheckpointDelta(row,request,{hashKey:this.key,allowInstructionUpdates}) || compactedDelta({...row,pendingIds:new Set()},request,{hashKey:this.key,allowInstructionUpdates}) || continuationDelta({ ...row,
           ...(row.verifiedToolResults?{options:{allowToolHandoffUserMessages:true}}:{}),
           pendingIds: new Set(row.verifiedToolResults?.map(v=>v.id)||[]) }, request,
         { allowInstructionUpdates, hashKey: this.key });
