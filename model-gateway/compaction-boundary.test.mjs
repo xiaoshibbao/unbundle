@@ -62,3 +62,21 @@ test('Desktop 省略旧头部后仅允许唯一完整工具批次至最新回复
  const repeated={...s,request:{...s.request,messages:[...s.request.messages,call,receipt]}};
  assert.equal(compactionBoundary(repeated,r),undefined);
 });
+
+
+import {recordBashPhase} from './tool-boundary-trace.mjs';
+import {historyKey} from './session-history.mjs';
+test('原生等待工具时压缩采用与普通续接相同的已采样 Bash 往返别名',()=>{
+ const id='compact-pending-bash',original='cd /e/ps && echo receipt';
+ for(const phase of ['cli','wire','desktop'])recordBashPhase(phase,id,'Bash',{command:phase==='desktop'?'echo receipt':original});
+ const native={role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name:'Bash',arguments:JSON.stringify({command:original,description:'test'})}}]};
+ const actual={...native,tool_calls:[{...native.tool_calls[0],function:{name:'Bash',arguments:JSON.stringify({command:'echo receipt',description:'test'})}}]};
+ const receipt={role:'tool',tool_call_id:id,content:'REAL_RESULT'};
+ const s={...session,state:'waiting-tool',lastAssistant:native,expected:historyKey(native),lastCalls:new Map([[id,native.tool_calls[0]]]),pendingIds:new Set([id]),pendingHttp:new Map([[id,{name:'Bash',args:native.tool_calls[0].function.arguments}]]),results:new Map(),pendingControls:new Map()};
+ const r={...request,messages:[system,user,actual,receipt,prompt]};
+ assert.deepEqual(compactionBoundary(s,r),{prompt,receipts:[receipt]});
+ for(const change of [v=>v.messages[2].content='changed',v=>v.messages[2].tool_calls[0].function.arguments='{"command":"echo different","description":"test"}',v=>v.messages[3].tool_call_id='other',v=>v.messages.splice(3,1),v=>v.messages.splice(3,0,receipt)]){
+  const v=structuredClone(r);change(v);assert.equal(compactionBoundary(s,v),undefined);
+ }
+ assert.equal(compactionBoundary({...s,lastCalls:new Map()},r),undefined);
+});

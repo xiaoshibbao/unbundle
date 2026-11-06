@@ -1,4 +1,4 @@
-import {historyKey,sessionHistory} from './session-history.mjs';
+import {historyKey,sessionHistory,assistantHistoryMatches} from './session-history.mjs';
 import {compactMemoryAliases,compactMemoryContext,splitCompactMemory} from './compact-memory-alias.mjs';
 
 export const SUMMARY_SYSTEM='You are a helpful AI assistant tasked with summarizing conversations.';
@@ -51,7 +51,7 @@ export function compactionBoundary(session,request,{hashKey,onReject}={}) {
  const options={hashKey,toolSchemas:session.request.tools};
  const aliases=compactMemoryAliases(session.request.messages,options);let alias;
  const same=(m,i)=>actual[i]&&(historyKey(m,options)===historyKey(actual[i],options)
-   ||i===expected.length-1&&session.expected===historyKey(actual[i],options)
+   ||i===expected.length-1&&assistantHistoryMatches(session,actual[i],options)
    ||(alias=aliases.find(a=>a.index===i&&a.hash===historyKey(actual[i],options))));
  let length=expected.length;
  if(actual.length<expected.length||!expected.every(same)){

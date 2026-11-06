@@ -48,6 +48,14 @@ export function splitCancelledUserMessage(messages,history,length,keyFor) {
   if(!suffix.trim()||keyFor(original)!==history[index])return messages;
   return [...messages.slice(0,index),original,{role:'user',content:suffix},...messages.slice(index+1)];
 }
+// 普通续接与压缩交接共用同一助手往返校验；映射仍须通过完整 HMAC 与三点采样。
+export function assistantHistoryMatches(session,actual,{hashKey,toolSchemas}={}) {
+ if(!session.expected||!actual)return false;
+ const keyFor=m=>historyKey(m,{hashKey,toolSchemas});
+ return keyFor(actual)===session.expected
+   ||!!session.request&&keyFor(mappedBashAssistant(actual,session.request.messages))===session.expected
+   ||keyFor(mappedPendingBashAssistant(actual,session))===session.expected;
+}
 export function historyKey(message, { exact = false, hashKey = key, toolSchemas } = {}) {
   // 仅忽略内容块顶层缓存元数据，图片和顺序仍严格比较。
   const value=Array.isArray(message.content)?message.content.map(block=>{const {cache_control,...content}=block;return content;}):message.content;
@@ -154,11 +162,7 @@ export function continuationDelta(session, request, { allowInstructionUpdates = 
   }
   if (!session.expected) return reject('no_expected_assistant');
   const actual=messages[prefix.length];
-  const strictMatch=historyKey(actual,{hashKey,toolSchemas})===session.expected;
-  // 使用原调用发出前保存的请求，不采用本轮新出现或工具执行后的 cwd。
-  const mappedMatch=!strictMatch&&(session.request&&historyKey(mappedBashAssistant(actual,session.request.messages),{hashKey,toolSchemas})===session.expected
-    ||historyKey(mappedPendingBashAssistant(actual,session),{hashKey,toolSchemas})===session.expected);
-  if (!strictMatch&&!mappedMatch) {
+  if (!assistantHistoryMatches(session,actual,{hashKey,toolSchemas})) {
     try { onAssistantMismatch?.(assistantDifference(session.expectedFingerprint,messages[prefix.length],{hashKey})); } catch {}
     return reject('assistant_message_mismatch');
   }
