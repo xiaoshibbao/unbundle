@@ -57,9 +57,22 @@ export function compactionBoundary(session,request,{hashKey,onReject}={}) {
  if(actual.length<expected.length||!expected.every(same)){
   alias=undefined;
   // Desktop 压缩可复用最后一次 API 输入；原生 CLI 已完成的末条回复仍在原会话中。
-  if(session.state!=='idle'||session.pendingIds.size||actual.length<original.length||!original.every(same)
-    ||actual.slice(original.length).some(m=>m.role!=='user'))return reject('source_history_mismatch');
-  length=original.length;
+  if(session.state==='idle'&&!session.pendingIds.size&&actual.length>=original.length&&original.every(same)
+    &&actual.slice(original.length).every(m=>m.role==='user'))length=original.length;
+  else {
+   alias=undefined;
+   // Desktop 可丢弃旧窗口头部。只接受以唯一真实工具批次开头、完整匹配至原生最新回复的尾部；不重放旧消息。
+   const first=actual[0],calls=first?.tool_calls;
+   if(session.state!=='idle'||session.pendingIds.size||first?.role!=='assistant'||!calls?.length
+     ||new Set(calls.map(c=>c.id)).size!==calls.length)return reject('source_history_mismatch');
+   const starts=expected.map((m,i)=>i>0&&historyKey(m,options)===historyKey(first,options)?i:-1).filter(i=>i>=0);
+   if(starts.length!==1)return reject('source_history_mismatch');
+   const start=starts[0],count=expected.length-start;
+   if(count<=calls.length||actual.length<count||!expected.slice(start).every((m,i)=>historyKey(m,options)===historyKey(actual[i],options))
+     ||calls.some((c,i)=>actual[i+1]?.role!=='tool'||actual[i+1].tool_call_id!==c.id)
+     ||actual.slice(count).some(m=>m.role!=='user'))return reject('source_history_mismatch');
+   length=count;
+  }
  }
  const appended=actual.slice(length),receipts=appended.filter(m=>m.role==='tool'),additionalUsers=appended.filter(m=>m.role==='user');
  if(alias){const context=compactMemoryContext(actual[alias.index]);if(!context)return reject('memory_alias_invalid');additionalUsers.push(context);}

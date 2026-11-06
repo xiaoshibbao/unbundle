@@ -45,3 +45,20 @@ test('手动压缩合并末条用户文本时保留原前缀，仍严格验证�
  const normal=compactionIntent({...req,messages:[system,user,{role:'user',content:instruction}]});assert.deepEqual(normal.messages,[user]);
  assert.equal(compactionIntent({...req,messages:[system,user,{role:'user',content:'继续\n\nYour task is to create a detailed summary of unrelated data'}]}),undefined);
 });
+
+
+test('Desktop 省略旧头部后仅允许唯一完整工具批次至最新回复的严格尾部用于压缩',()=>{
+ const call={role:'assistant',content:null,tool_calls:[{id:'known-id',type:'function',function:{name:'Bash',arguments:'{"command":"pwd"}'}}]};
+ const receipt={role:'tool',tool_call_id:'known-id',content:'/trusted/path'};
+ const s={...session,request:{...session.request,messages:[session.request.messages[0],user,call,receipt]},lastAssistant:assistant};
+ const r={...request,messages:[system,call,receipt,assistant,prompt]};
+ assert.deepEqual(compactionBoundary(s,r),{prompt,receipts:[]});
+ assert.equal(compactionBoundary(s,{...r,messages:[system,call,{...receipt,content:'changed'},assistant,prompt]}),undefined);
+ assert.equal(compactionBoundary(s,{...r,messages:[system,{...call,tool_calls:[{...call.tool_calls[0],id:'foreign'}]},receipt,assistant,prompt]}),undefined);
+ assert.equal(compactionBoundary(s,{...r,messages:[system,receipt,call,assistant,prompt]}),undefined);
+ assert.equal(compactionBoundary(s,{...r,messages:[system,assistant,prompt]}),undefined);
+ assert.equal(compactionBoundary(s,{...r,messages:[system,call,receipt,prompt]}),undefined);
+ assert.equal(compactionBoundary({...s,state:'waiting-tool'},r),undefined);
+ const repeated={...s,request:{...s.request,messages:[...s.request.messages,call,receipt]}};
+ assert.equal(compactionBoundary(repeated,r),undefined);
+});

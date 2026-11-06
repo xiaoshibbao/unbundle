@@ -122,3 +122,18 @@ test('空闲原生压缩被每周限额拒绝后保留可重试边界，额度�
   const frames=await s.frames();assert.equal(frames.filter(f=>f.message?.content==='/compact').length,2);assert.equal(frames.filter(f=>f.type==='user'&&f.message?.content!=='/compact').length,1);
  }finally{await s.close();}
 });
+
+
+test('省略头部的真实工具尾部压缩后 Desktop 续接仍使用同一 CLI',async()=>{
+ const s=await setup();try{
+  const original={...base,messages:[base.messages[0],{role:'user',content:'TOOL_TASK'}]};
+  const first=await s.relay.infer(original),receipt={role:'tool',tool_call_id:'tool-synthetic',content:'REAL_RESULT'};
+  const continued={...base,messages:[...original.messages,assistantMessage(first),receipt]};
+  const second=await s.relay.infer(continued);
+  const summary=await s.relay.infer({...base,messages:[base.messages[0],assistantMessage(first),receipt,assistantMessage(second),prompt]});
+  assert.match(summary.content,/actual task summary/);
+  const wrapper={role:'user',content:SUMMARY_HEADER+'\n\n'+desktopSummary(summary.content)};
+  assert.equal((await s.relay.infer({...base,messages:[base.messages[0],wrapper,{role:'user',content:'next task'}]})).content,'READY');
+  assert.equal(s.spawns(),1);assert.equal((await s.frames()).filter(f=>f.message?.content==='/compact').length,1);
+ }finally{await s.close();}
+});
